@@ -280,17 +280,20 @@ export async function transcribeAudio(filePath: string): Promise<string> {
 /**
  * Convert text to speech using ElevenLabs and return the audio as a Buffer.
  */
-async function synthesizeSpeechElevenLabs(text: string): Promise<Buffer> {
-  const env = readEnvFile(['ELEVENLABS_API_KEY', 'ELEVENLABS_VOICE_ID']);
+async function synthesizeSpeechElevenLabs(text: string, voiceIdOverride?: string, modelIdOverride?: string): Promise<Buffer> {
+  const env = readEnvFile(['ELEVENLABS_API_KEY', 'ELEVENLABS_VOICE_ID', 'ELEVENLABS_MODEL_ID']);
   const apiKey = env.ELEVENLABS_API_KEY;
-  const voiceId = env.ELEVENLABS_VOICE_ID;
+  const voiceId = voiceIdOverride || env.ELEVENLABS_VOICE_ID;
+  const modelId = modelIdOverride || env.ELEVENLABS_MODEL_ID || 'eleven_turbo_v2_5';
 
   if (!apiKey) throw new Error('ELEVENLABS_API_KEY not set');
   if (!voiceId) throw new Error('ELEVENLABS_VOICE_ID not set');
 
+  logger.info({ voiceId, modelId, textLength: text.length }, 'ElevenLabs TTS request');
+
   const payload = JSON.stringify({
     text,
-    model_id: 'eleven_turbo_v2_5',
+    model_id: modelId,
     voice_settings: {
       stability: 0.5,
       similarity_boost: 0.75,
@@ -440,19 +443,19 @@ export async function synthesizeSpeechLocal(text: string): Promise<Buffer> {
  * Convert text to speech using the first available provider.
  * Priority: ElevenLabs → Gradium AI → Kokoro (local) → macOS say + ffmpeg.
  */
-export async function synthesizeSpeech(text: string): Promise<Buffer> {
+export async function synthesizeSpeech(text: string, voiceIdOverride?: string, modelIdOverride?: string): Promise<Buffer> {
   const env = readEnvFile([
     'ELEVENLABS_API_KEY', 'ELEVENLABS_VOICE_ID',
     'GRADIUM_API_KEY', 'GRADIUM_VOICE_ID',
     'KOKORO_URL',
   ]);
 
-  const hasElevenLabs = !!(env.ELEVENLABS_API_KEY && env.ELEVENLABS_VOICE_ID);
+  const hasElevenLabs = !!(env.ELEVENLABS_API_KEY && (voiceIdOverride || env.ELEVENLABS_VOICE_ID));
   const hasGradium = !!(env.GRADIUM_API_KEY && env.GRADIUM_VOICE_ID);
 
   if (hasElevenLabs) {
     try {
-      return await synthesizeSpeechElevenLabs(text);
+      return await synthesizeSpeechElevenLabs(text, voiceIdOverride, modelIdOverride);
     } catch (err) {
       logger.warn({ err }, 'ElevenLabs TTS failed, trying next provider');
     }
@@ -484,7 +487,7 @@ export async function synthesizeSpeech(text: string): Promise<Buffer> {
  * Check whether voice mode is available (all required env vars are set).
  * TTS is available if any provider is configured or macOS say is available.
  */
-export function voiceCapabilities(): { stt: boolean; tts: boolean } {
+export function voiceCapabilities(voiceIdOverride?: string): { stt: boolean; tts: boolean } {
   const env = readEnvFile([
     'GROQ_API_KEY',
     'WHISPER_MODEL_PATH',
@@ -495,7 +498,7 @@ export function voiceCapabilities(): { stt: boolean; tts: boolean } {
 
   return {
     stt: !!env.GROQ_API_KEY || !!env.WHISPER_MODEL_PATH,
-    tts: !!(env.ELEVENLABS_API_KEY && env.ELEVENLABS_VOICE_ID)
+    tts: !!(env.ELEVENLABS_API_KEY && (voiceIdOverride || env.ELEVENLABS_VOICE_ID))
       || !!(env.GRADIUM_API_KEY && env.GRADIUM_VOICE_ID)
       || !!env.KOKORO_URL
       || process.platform === 'darwin',
