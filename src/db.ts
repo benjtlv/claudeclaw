@@ -217,18 +217,24 @@ function createSchema(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_inter_agent_tasks_status ON inter_agent_tasks(status, created_at DESC);
 
     CREATE TABLE IF NOT EXISTS mission_tasks (
-      id              TEXT PRIMARY KEY,
-      title           TEXT NOT NULL,
-      prompt          TEXT NOT NULL,
-      assigned_agent  TEXT,
-      status          TEXT NOT NULL DEFAULT 'queued',
-      result          TEXT,
-      error           TEXT,
-      created_by      TEXT NOT NULL DEFAULT 'dashboard',
-      priority        INTEGER NOT NULL DEFAULT 0,
-      created_at      INTEGER NOT NULL,
-      started_at      INTEGER,
-      completed_at    INTEGER
+      id                TEXT PRIMARY KEY,
+      title             TEXT NOT NULL,
+      prompt            TEXT NOT NULL,
+      assigned_agent    TEXT,
+      status            TEXT NOT NULL DEFAULT 'queued',
+      result            TEXT,
+      error             TEXT,
+      created_by        TEXT NOT NULL DEFAULT 'dashboard',
+      priority          INTEGER NOT NULL DEFAULT 0,
+      created_at        INTEGER NOT NULL,
+      started_at        INTEGER,
+      completed_at      INTEGER,
+      callback_url      TEXT,
+      callback_method   TEXT,
+      callback_headers  TEXT,
+      callback_payload  TEXT,
+      callback_status   TEXT,
+      callback_attempts INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE INDEX IF NOT EXISTS idx_mission_status
@@ -245,6 +251,18 @@ function createSchema(database: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_log(agent_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS task_logs (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id      TEXT NOT NULL,
+      task_type   TEXT NOT NULL,
+      agent_id    TEXT NOT NULL DEFAULT 'main',
+      event_type  TEXT NOT NULL,
+      content     TEXT NOT NULL DEFAULT '',
+      created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_logs_run ON task_logs(run_id, created_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_task_logs_agent ON task_logs(agent_id, created_at DESC);
 
     CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
       summary,
@@ -533,6 +551,21 @@ function runMigrations(database: Database.Database): void {
     `);
     logger.info('Migration: made mission_tasks.assigned_agent nullable');
   }
+
+  // Mission Control: add callback columns for webhook-on-completion
+  const missionColsPost = database.prepare(`PRAGMA table_info(mission_tasks)`).all() as Array<{ name: string }>;
+  const hasCallbackUrl = missionColsPost.some((c) => c.name === 'callback_url');
+  if (!hasCallbackUrl) {
+    database.exec(`
+      ALTER TABLE mission_tasks ADD COLUMN callback_url TEXT;
+      ALTER TABLE mission_tasks ADD COLUMN callback_method TEXT;
+      ALTER TABLE mission_tasks ADD COLUMN callback_headers TEXT;
+      ALTER TABLE mission_tasks ADD COLUMN callback_payload TEXT;
+      ALTER TABLE mission_tasks ADD COLUMN callback_status TEXT;
+      ALTER TABLE mission_tasks ADD COLUMN callback_attempts INTEGER NOT NULL DEFAULT 0;
+    `);
+    logger.info('Migration: added callback columns to mission_tasks');
+  }
 }
 
 /** @internal - for tests only. Creates a fresh in-memory database. */
@@ -813,6 +846,7 @@ export function decayMemories(): void {
     END
     WHERE created_at < ? AND pinned = 0
   `).run(oneDayAgo);
+  db.prepare('UPDATE memories SET superseded_by = NULL WHERE superseded_by IN (SELECT id FROM memories WHERE salience < 0.05 AND pinned = 0)').run();
   db.prepare('DELETE FROM memories WHERE salience < 0.05 AND pinned = 0').run();
 }
 
@@ -1040,6 +1074,20 @@ export function getRecentTaskOutputs(
        ORDER BY last_run DESC LIMIT 3`,
     )
     .all(agentId, cutoff) as Array<{ prompt: string; last_result: string; last_run: number }>;
+}
+
+export function getRecentMissionOutputs(
+  agentId: string,
+  withinMinutes = 30,
+): Array<{ title: string; prompt: string; result: string; completed_at: number }> {
+  const cutoff = Math.floor(Date.now() / 1000) - withinMinutes * 60;
+  return db
+    .prepare(
+      `SELECT title, prompt, result, completed_at FROM mission_tasks
+       WHERE assigned_agent = ? AND status = 'completed' AND result IS NOT NULL AND completed_at > ?
+       ORDER BY completed_at DESC LIMIT 3`,
+    )
+    .all(agentId, cutoff) as Array<{ title: string; prompt: string; result: string; completed_at: number }>;
 }
 
 // ── WhatsApp message map ──────────────────────────────────────────────
@@ -1769,6 +1817,13 @@ export function getInterAgentTasks(
 
 // ── Mission Tasks (one-shot async tasks for Mission Control) ─────────
 
+export interface MissionTaskCallback {
+  url: string;
+  method?: string;
+  headers?: Record<string, string>;
+  payload?: Record<string, unknown>;
+}
+
 export interface MissionTask {
   id: string;
   title: string;
@@ -1782,6 +1837,12 @@ export interface MissionTask {
   created_at: number;
   started_at: number | null;
   completed_at: number | null;
+  callback_url: string | null;
+  callback_method: string | null;
+  callback_headers: string | null;
+  callback_payload: string | null;
+  callback_status: string | null;
+  callback_attempts: number;
 }
 
 export function createMissionTask(
@@ -1791,12 +1852,31 @@ export function createMissionTask(
   assignedAgent: string | null = null,
   createdBy = 'dashboard',
   priority = 0,
+  callback: MissionTaskCallback | null = null,
 ): void {
   const now = Math.floor(Date.now() / 1000);
   db.prepare(
-    `INSERT INTO mission_tasks (id, title, prompt, assigned_agent, status, created_by, priority, created_at)
-     VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)`,
-  ).run(id, title, prompt, assignedAgent, createdBy, priority, now);
+    `INSERT INTO mission_tasks (
+       id, title, prompt, assigned_agent, status, created_by, priority, created_at,
+       callback_url, callback_method, callback_headers, callback_payload
+     ) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    id, title, prompt, assignedAgent, createdBy, priority, now,
+    callback?.url ?? null,
+    callback?.method ?? null,
+    callback?.headers ? JSON.stringify(callback.headers) : null,
+    callback?.payload ? JSON.stringify(callback.payload) : null,
+  );
+}
+
+export function markMissionCallback(
+  id: string,
+  status: 'sent' | 'failed' | 'skipped',
+  attempts: number,
+): void {
+  db.prepare(
+    `UPDATE mission_tasks SET callback_status = ?, callback_attempts = ? WHERE id = ?`,
+  ).run(status, attempts, id);
 }
 
 export function getUnassignedMissionTasks(): MissionTask[] {
@@ -1967,4 +2047,51 @@ export function getRecentBlockedActions(limit = 10): AuditLogEntry[] {
   return db.prepare(
     `SELECT * FROM audit_log WHERE blocked = 1 ORDER BY created_at DESC LIMIT ?`,
   ).all(limit) as AuditLogEntry[];
+}
+
+// ── Task Logs ─────────────────────────────────────────────────────────
+
+export interface TaskLogEntry {
+  id: number;
+  run_id: string;
+  task_type: string;
+  agent_id: string;
+  event_type: string;
+  content: string;
+  created_at: number;
+}
+
+const logTaskEventStmt = () => db.prepare(
+  `INSERT INTO task_logs (run_id, task_type, agent_id, event_type, content, created_at)
+   VALUES (?, ?, ?, ?, ?, ?)`,
+);
+
+export function logTaskEvent(
+  runId: string,
+  taskType: 'scheduled' | 'mission' | 'direct',
+  agentId: string,
+  eventType: string,
+  content: string,
+): void {
+  const now = Math.floor(Date.now() / 1000);
+  logTaskEventStmt().run(runId, taskType, agentId, eventType, content.slice(0, 8000), now);
+}
+
+export function getTaskLogs(runId: string, limit = 500): TaskLogEntry[] {
+  return db.prepare(
+    `SELECT * FROM task_logs WHERE run_id = ? ORDER BY created_at ASC, id ASC LIMIT ?`,
+  ).all(runId, limit) as TaskLogEntry[];
+}
+
+export function getRecentTaskRuns(agentId?: string, limit = 20): Array<{ run_id: string; task_type: string; agent_id: string; event_count: number; first_at: number; last_at: number }> {
+  if (agentId) {
+    return db.prepare(
+      `SELECT run_id, task_type, agent_id, COUNT(*) as event_count, MIN(created_at) as first_at, MAX(created_at) as last_at
+       FROM task_logs WHERE agent_id = ? GROUP BY run_id ORDER BY last_at DESC LIMIT ?`,
+    ).all(agentId, limit) as Array<{ run_id: string; task_type: string; agent_id: string; event_count: number; first_at: number; last_at: number }>;
+  }
+  return db.prepare(
+    `SELECT run_id, task_type, agent_id, COUNT(*) as event_count, MIN(created_at) as first_at, MAX(created_at) as last_at
+     FROM task_logs GROUP BY run_id ORDER BY last_at DESC LIMIT ?`,
+  ).all(limit) as Array<{ run_id: string; task_type: string; agent_id: string; event_count: number; first_at: number; last_at: number }>;
 }

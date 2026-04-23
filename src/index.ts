@@ -6,7 +6,7 @@ import path from 'path';
 import { loadAgentConfig, buildVoiceAgentConfigFromEnv, resolveAgentDir, resolveAgentClaudeMd } from './agent-config.js';
 import { createBot } from './bot.js';
 import { checkPendingMigrations } from './migrations.js';
-import { ALLOWED_CHAT_ID, activeBotToken, STORE_DIR, PROJECT_ROOT, CLAUDECLAW_CONFIG, GOOGLE_API_KEY, setAgentOverrides, SECURITY_PIN_HASH, IDLE_LOCK_MINUTES, EMERGENCY_KILL_PHRASE, expandHome } from './config.js';
+import { ALLOWED_CHAT_ID, activeBotToken, STORE_DIR, PROJECT_ROOT, CLAUDECLAW_CONFIG, GOOGLE_API_KEY, setAgentOverrides, SECURITY_PIN_HASH, IDLE_LOCK_MINUTES, EMERGENCY_KILL_PHRASE, expandHome, MCP_SERVERS } from './config.js';
 import { startVoiceApi } from './voice-api.js';
 import { launchVoiceAgent, stopVoiceAgent } from './voice-launcher.js';
 import { startDashboard } from './dashboard.js';
@@ -73,6 +73,7 @@ if (AGENT_ID !== 'main') {
         botToken: activeBotToken,
         cwd: PROJECT_ROOT,
         systemPrompt,
+        mcpServers: MCP_SERVERS,
       });
       logger.info({ source: externalClaudeMd }, 'Loaded CLAUDE.md from CLAUDECLAW_CONFIG');
     }

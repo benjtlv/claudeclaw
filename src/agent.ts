@@ -8,40 +8,72 @@ import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 
 // ── MCP server loading ──────────────────────────────────────────────
-// The Agent SDK's settingSources loads CLAUDE.md and permissions from
-// project/user settings, but does NOT load mcpServers from those files.
-// We read them ourselves and pass them via the `mcpServers` option.
+// We read MCP configs from all sources Claude Code would discover,
+// filter by the agent's allowlist, and pass them via `mcpServers` +
+// `strictMcpConfig: true`. The --strict-mcp-config CLI flag tells
+// Claude Code to ONLY use the MCPs we provide, ignoring all other
+// sources (.mcp.json, settings.json, plugins).
 
-interface McpStdioConfig {
+// Matches SDK types: McpStdioServerConfig | McpHttpServerConfig | McpSSEServerConfig
+type McpServerEntry = {
+  type?: 'stdio';
   command: string;
   args?: string[];
   env?: Record<string, string>;
-}
+} | {
+  type: 'http' | 'sse';
+  url: string;
+  headers?: Record<string, string>;
+};
 
-function loadMcpServers(allowlist?: string[]): Record<string, McpStdioConfig> {
-  const merged: Record<string, McpStdioConfig> = {};
+/**
+ * Load MCP servers from ALL sources that Claude Code would discover:
+ *  - settings.json (project + user)
+ *  - .mcp.json (project cwd + user home ~/.claude/)
+ *
+ * When an allowlist is provided, only MCPs matching the allowlist are returned.
+ * Combined with strictMcpConfig: true, this gives deterministic MCP control.
+ */
+function loadMcpServers(allowlist?: string[]): Record<string, McpServerEntry> {
+  const merged: Record<string, McpServerEntry> = {};
 
-  // Load from project settings (.claude/settings.json in cwd)
-  const projectSettings = path.join(agentCwd ?? PROJECT_ROOT, '.claude', 'settings.json');
-  // Load from user settings (~/.claude/settings.json)
-  const userSettings = path.join(
-    process.env.HOME ?? '/tmp',
-    '.claude',
-    'settings.json',
-  );
+  const cwd = agentCwd ?? PROJECT_ROOT;
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? '/tmp';
 
-  for (const file of [userSettings, projectSettings]) {
+  // All files that Claude Code reads for MCP server configs.
+  // PROJECT_ROOT is included explicitly so sub-agents (whose cwd is their own
+  // agent dir, e.g. agents/bob/) still see the repo-level .mcp.json where
+  // shared MCP servers like render/context7 live.
+  const mcpFiles = [
+    // settings.json files (mcpServers key)
+    { file: path.join(home, '.claude', 'settings.json'), key: 'mcpServers' },
+    { file: path.join(PROJECT_ROOT, '.claude', 'settings.json'), key: 'mcpServers' },
+    { file: path.join(cwd, '.claude', 'settings.json'), key: 'mcpServers' },
+    // .mcp.json files (mcpServers key)
+    { file: path.join(home, '.claude', '.mcp.json'), key: 'mcpServers' },
+    { file: path.join(PROJECT_ROOT, '.mcp.json'), key: 'mcpServers' },
+    { file: path.join(cwd, '.mcp.json'), key: 'mcpServers' },
+  ];
+
+  for (const { file, key } of mcpFiles) {
     try {
       const raw = JSON.parse(fs.readFileSync(file, 'utf-8'));
-      const servers = raw?.mcpServers;
+      const servers = raw?.[key];
       if (servers && typeof servers === 'object') {
         for (const [name, config] of Object.entries(servers)) {
           const cfg = config as Record<string, unknown>;
+          // Support both stdio (command-based) and HTTP/URL-based MCP servers
           if (cfg.command && typeof cfg.command === 'string') {
             merged[name] = {
               command: cfg.command,
               ...(cfg.args ? { args: cfg.args as string[] } : {}),
               ...(cfg.env ? { env: cfg.env as Record<string, string> } : {}),
+            };
+          } else if ((cfg.type === 'http' || cfg.type === 'sse') && typeof cfg.url === 'string') {
+            merged[name] = {
+              type: cfg.type,
+              url: cfg.url,
+              ...(cfg.headers ? { headers: cfg.headers as Record<string, string> } : {}),
             };
           }
         }
@@ -159,6 +191,9 @@ async function* singleTurn(text: string): AsyncGenerator<{
  * @param onTyping   Called every TYPING_REFRESH_MS while waiting — sends typing action to Telegram
  * @param onProgress Called when sub-agents start/complete — sends status updates to Telegram
  */
+/** Callback fired for each meaningful SDK event during agent execution. */
+export type AgentEventCallback = (eventType: string, content: string) => void;
+
 export async function runAgent(
   message: string,
   sessionId: string | undefined,
@@ -168,6 +203,7 @@ export async function runAgent(
   abortController?: AbortController,
   onStreamText?: (accumulatedText: string) => void,
   mcpAllowlist?: string[],
+  onEvent?: AgentEventCallback,
 ): Promise<AgentResult> {
   // Read secrets from .env without polluting process.env.
   // CLAUDE_CODE_OAUTH_TOKEN is optional — the subprocess finds auth via ~/.claude/
@@ -204,8 +240,16 @@ export async function runAgent(
       'Starting agent query',
     );
 
-    // SDK Options.mcpServers expects Record<string, McpServerConfig>
-    const mcpServerSpecs = mcpServerNames.length > 0 ? mcpServers : undefined;
+    // When an allowlist is provided, pass strictMcpConfig: true which tells
+    // the CLI: "Only use MCP servers from --mcp-config, ignoring all other
+    // MCP configurations" (.mcp.json, settings.json, plugins -- everything).
+    // We still include 'user' in settingSources so skills load normally.
+    const hasAllowlist = mcpAllowlist !== undefined;
+    const mcpOverrides = hasAllowlist
+      ? { mcpServers: mcpServers as Record<string, McpServerEntry>, strictMcpConfig: true }
+      : mcpServerNames.length > 0
+        ? { mcpServers: mcpServers as Record<string, McpServerEntry> }
+        : {};
 
     for await (const event of query({
       prompt: singleTurn(message),
@@ -217,7 +261,8 @@ export async function runAgent(
         // Resume the previous session for this chat (persistent context)
         resume: sessionId,
 
-        // 'project' loads CLAUDE.md from cwd; 'user' loads ~/.claude/skills/ and user settings
+        // 'project' loads CLAUDE.md from cwd; 'user' loads ~/.claude/skills/.
+        // strictMcpConfig prevents the CLI from loading MCPs from these sources.
         settingSources: ['project', 'user'],
 
         // Skip all permission prompts — this is a trusted personal bot on your own machine
@@ -227,8 +272,9 @@ export async function runAgent(
         // Pass secrets to the subprocess without polluting our own process.env
         env: sdkEnv,
 
-        // MCP servers loaded from .claude/settings.json and ~/.claude/settings.json
-        ...(mcpServerSpecs ? { mcpServers: mcpServerSpecs } : {}),
+        // MCPs loaded from all sources and filtered by the agent's allowlist.
+        // With strictMcpConfig, the CLI uses ONLY these and ignores all others.
+        ...mcpOverrides,
 
         // Stream partial text so Telegram can show progressive updates
         includePartialMessages: !!onStreamText,
@@ -245,6 +291,7 @@ export async function runAgent(
       if (ev['type'] === 'system' && ev['subtype'] === 'init') {
         newSessionId = ev['session_id'] as string;
         logger.info({ newSessionId }, 'Session initialized');
+        onEvent?.('system', `Session initialized: ${newSessionId}`);
       }
 
       // Detect auto-compaction (context window was getting full)
@@ -256,6 +303,7 @@ export async function runAgent(
           { trigger: meta?.trigger, preCompactTokens },
           'Context window compacted',
         );
+        onEvent?.('system', `Context compacted (trigger: ${meta?.trigger}, pre_tokens: ${preCompactTokens})`);
       }
 
       // Track per-call token usage and detect tool use from assistant message events.
@@ -273,31 +321,35 @@ export async function runAgent(
           lastCallInputTokens = callInputTokens;
         }
 
-        // Extract tool_use blocks from assistant content for progress reporting
-        if (onProgress) {
-          const content = msg?.['content'] as Array<{ type: string; name?: string }> | undefined;
-          if (Array.isArray(content)) {
-            for (const block of content) {
-              if (block.type === 'tool_use' && block.name) {
-                onProgress({ type: 'tool_active', description: toolLabel(block.name) });
-              }
+        // Extract tool_use and text blocks from assistant content
+        const content = msg?.['content'] as Array<{ type: string; name?: string; input?: unknown; text?: string }> | undefined;
+        if (Array.isArray(content)) {
+          for (const block of content) {
+            if (block.type === 'tool_use' && block.name) {
+              if (onProgress) onProgress({ type: 'tool_active', description: toolLabel(block.name) });
+              onEvent?.('tool_use', `${toolLabel(block.name)}${block.input ? ': ' + JSON.stringify(block.input).slice(0, 500) : ''}`);
+            }
+            if (block.type === 'text' && block.text) {
+              onEvent?.('assistant_text', block.text.slice(0, 2000));
             }
           }
         }
       }
 
       // Sub-agent lifecycle events — surface to Telegram for user feedback
-      if (ev['type'] === 'system' && ev['subtype'] === 'task_started' && onProgress) {
+      if (ev['type'] === 'system' && ev['subtype'] === 'task_started') {
         const desc = (ev['description'] as string) ?? 'Sub-agent started';
-        onProgress({ type: 'task_started', description: desc });
+        if (onProgress) onProgress({ type: 'task_started', description: desc });
+        onEvent?.('system', `Sub-agent started: ${desc}`);
       }
-      if (ev['type'] === 'system' && ev['subtype'] === 'task_notification' && onProgress) {
+      if (ev['type'] === 'system' && ev['subtype'] === 'task_notification') {
         const summary = (ev['summary'] as string) ?? 'Sub-agent finished';
         const status = (ev['status'] as string) ?? 'completed';
-        onProgress({
+        if (onProgress) onProgress({
           type: 'task_completed',
           description: status === 'failed' ? `Failed: ${summary}` : summary,
         });
+        onEvent?.('system', `Sub-agent ${status}: ${summary}`);
       }
 
       // Stream text deltas for progressive Telegram updates.
@@ -350,11 +402,13 @@ export async function runAgent(
           { hasResult: !!resultText, subtype: ev['subtype'] },
           'Agent result received',
         );
+        onEvent?.('result', `Cost: $${usage?.totalCostUsd?.toFixed(4) ?? '?'}, tokens: ${usage?.inputTokens ?? '?'}in/${usage?.outputTokens ?? '?'}out${didCompact ? ' (compacted)' : ''}`);
       }
     }
   } catch (err) {
     if (abortController?.signal.aborted) {
       logger.info('Agent query aborted by user');
+      onEvent?.('abort', 'Agent aborted');
       return { text: null, newSessionId, usage, aborted: true };
     }
     throw err;

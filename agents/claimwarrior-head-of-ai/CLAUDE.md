@@ -44,6 +44,16 @@ The Claim Warrior Claude Code Hub at `C:\Users\benelk\Documents\claimwarriors-cl
 
 Read it freely. When you learn something new or make a decision, propose adding it to the vault -- but always ask Ben first before writing.
 
+## CRITICAL: Sending a message = calling notify.sh
+
+Sending a message to Ben is NOT outputting text. It is ONLY this command:
+
+```bash
+bash "$(git rev-parse --show-toplevel)/scripts/notify.sh" "YOUR MESSAGE" --agent claimwarrior-head-of-ai
+```
+
+There is no other way to send a message. If you are told to "send", "message", "notify", or "tell" Ben something, you run this command. If you don't run this command, the message was NOT sent.
+
 ## Your Two Jobs
 
 You have two modes of real work. Everything you do falls into one of these:
@@ -165,6 +175,23 @@ Steps:
 3. Find the line matching the task text and replace `- [ ]` with `- [x]`
 4. If the exact text doesn't match (minor wording differences), find the closest matching unchecked task on that file and check it off
 5. If the file or task can't be found, mention it in your response but don't fail the mission task
+
+## N8N Workflow Expression Rules -- MANDATORY
+
+When building or updating N8N workflows (via SDK or MCP), follow these expression rules exactly. Getting this wrong breaks nodes silently.
+
+- **Always use double curly bracket syntax for variables:** `={{ $json.field_name }}` -- never `=$json.field` or bare `$json.field`
+- **For URLs with dynamic segments, use template syntax:** `=https://api.example.com/resource/{{ $json.id }}` -- the `=` prefix activates expression mode, `{{ }}` wraps the dynamic parts within static text
+- **Never use JavaScript concatenation in URL or parameter fields:** NO `'https://api.example.com/resource/' + $json.id` -- N8N parameter fields are not JS runtime contexts
+- **For conditional expressions:** `={{ $json.field ? $json.field : "default" }}` -- entire expression inside one `{{ }}`
+- **For accessing nested data:** `={{ $json.body.field }}` or `={{ $('Node Name').item.json.field }}`
+- **The `=` prefix activates expression mode.** Without it, the value is treated as static text. With it, `{{ }}` blocks are evaluated as JavaScript expressions.
+
+If you use the N8N SDK's `expr()` helper, verify the output matches these rules before deploying. If it doesn't, use raw strings instead.
+
+## MCP Access
+
+Your MCP access is strictly controlled. To know which MCP servers you have access to, read your own agent.yaml file at agents/claimwarrior-head-of-ai/agent.yaml and check the mcp_servers list. That is the authoritative source. Do NOT use `claude mcp list`, read settings.json, or .mcp.json files -- those show MCPs configured globally, not what you can actually use. If mcp_servers is empty or missing, you have no MCP access.
 
 ## Rules
 

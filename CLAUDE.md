@@ -188,6 +188,10 @@ GOOD: [delegates to the CW agent via mission task with clear instructions]
 
 <!-- Add any other tools, directories, or services relevant to your setup here -->
 
+## MCP Access
+
+Your MCP access is strictly controlled. To know which MCP servers you have access to, check the MCP_SERVERS variable in the project .env file. That is the authoritative source. Do NOT use `claude mcp list`, read settings.json, or .mcp.json files -- those show MCPs configured globally, not what you can actually use. If MCP_SERVERS is empty or missing, you have unrestricted MCP access.
+
 ## Available Skills (invoke automatically when relevant)
 
 <!-- This table lists skills commonly available. Edit to match what you actually have
@@ -252,11 +256,11 @@ node "$PROJECT_ROOT/dist/schedule-cli.js" resume <id>
 **Structure:** Each file has day sections with headings like `## Monday, April 7`, `## Tuesday, April 8`, etc. Tasks go under the relevant day's heading.
 
 **Steps:**
-1. Run `date` to get today's actual day name and date. NEVER guess the day of the week.
-2. Calculate the Monday and Sunday of the current week to find the right file.
-3. Read the weekly task file. If it doesn't exist, create it with day headings for Monday through Saturday and a Notes section at the bottom.
-4. Add each task as a `- [ ] Task description @Ben` line (or `@agent-name` if delegated) under today's day heading. Keep it flat -- no priority sections, no categories, just a simple list.
-3. **Whether the task is for Ben OR an agent, it goes in Obsidian.** If delegated to a named agent (research, comms, content, ops, claimwarrior, joy), ALSO create a mission task via `mission-cli.js` and include the `[obsidian-task:]` marker so the agent can check it off when done.
+1. Run `date` via Bash to get today's exact date and day of the week. NEVER guess or assume the day -- always verify with the system command.
+2. From the system date, calculate the Monday and Sunday of that week. Double-check: Monday is the start, Sunday is the end. Confirm both dates are correct before proceeding.
+3. Construct the expected filename: `YYYY-MM-DD_to_YYYY-MM-DD.md` using those Monday/Sunday dates. Check if that file exists in `C:\Users\benelk\Documents\AI-OS\Tasks\`. If it does not exist, create it with day headings for Monday through Sunday (all 7 days) and a Notes section at the bottom.
+4. Add each task as a `- [ ] Task description @Ben` line (or `@agent-name` if delegated) under the correct day's heading. Before writing, verify the day name and date one more time against the system date. Keep it flat -- no priority sections, no categories, just a simple list.
+5. **Whether the task is for Ben OR an agent, it goes in Obsidian.** If delegated to a named agent (pat, joy, bob, etc..), ALSO create a mission task via `mission-cli.js` and include the `[obsidian-task:]` marker so the agent can check it off when done.
 
 **CRITICAL: "me", "I", "my" = Ben.** When Ben says "add a task for me" or "I need to do X", that means create an Obsidian task assigned to Ben (`@Ben`). Do NOT create a mission task. Do NOT assign it to the main agent. Mission tasks are ONLY for delegating to other agents by name.
 
@@ -341,6 +345,16 @@ Here's the quarterly report.
 [SEND_FILE:/tmp/q1-report.pdf|Q1 2026 Report]
 Let me know if you need any changes.
 ```
+
+## CRITICAL: Sending a message = calling notify.sh
+
+Sending a message to Ben is NOT outputting text. It is ONLY this command:
+
+```bash
+bash "$(git rev-parse --show-toplevel)/scripts/notify.sh" "YOUR MESSAGE"
+```
+
+No `--agent` flag needed -- you are the main agent. There is no other way to send a message. If you are told to "send", "message", "notify", or "tell" Ben something, you run this command. If you don't run this command, the message was NOT sent.
 
 ## Message Format
 

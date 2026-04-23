@@ -34,6 +34,12 @@ export interface SlackFile {
   url: string;
 }
 
+export interface SlackReaction {
+  name: string;
+  count: number;
+  users: string[];
+}
+
 export interface SlackMessage {
   text: string;
   userName: string;
@@ -42,6 +48,7 @@ export interface SlackMessage {
   threadTs?: string;
   replyCount?: number;
   files?: SlackFile[];
+  reactions?: SlackReaction[];
 }
 
 // ── User cache ──────────────────────────────────────────────────────
@@ -145,13 +152,14 @@ export async function getSlackConversations(limit = 10): Promise<SlackConversati
   return mapped.slice(0, limit);
 }
 
-export async function getSlackMessages(channelId: string, limit = 15): Promise<SlackMessage[]> {
+export async function getSlackMessages(channelId: string, limit = 15, oldest?: string): Promise<SlackMessage[]> {
   const web = getClient();
   const meId = await getMyUserId();
 
   const result = await web.conversations.history({
     channel: channelId,
     limit,
+    ...(oldest ? { oldest } : {}),
   });
 
   const messages: SlackMessage[] = [];
@@ -174,6 +182,14 @@ export async function getSlackMessages(channelId: string, limit = 15): Promise<S
       }
     }
 
+    // Extract reactions (eyes, thumbsup, etc.) — avoids separate reactions.get calls
+    const rawReactions = (msg as any).reactions as Array<{ name: string; count: number; users: string[] }> | undefined;
+    const reactions: SlackReaction[] | undefined = rawReactions?.map((r) => ({
+      name: r.name,
+      count: r.count,
+      users: r.users || [],
+    }));
+
     messages.push({
       text: msg.text || '',
       userName,
@@ -182,6 +198,7 @@ export async function getSlackMessages(channelId: string, limit = 15): Promise<S
       threadTs: msg.thread_ts,
       replyCount: (msg as any).reply_count || undefined,
       ...(files.length > 0 ? { files } : {}),
+      ...(reactions ? { reactions } : {}),
     });
   }
 
@@ -216,6 +233,13 @@ export async function getSlackThreadReplies(channelId: string, threadTs: string)
       }
     }
 
+    const rawReactions = (msg as any).reactions as Array<{ name: string; count: number; users: string[] }> | undefined;
+    const reactions: SlackReaction[] | undefined = rawReactions?.map((r) => ({
+      name: r.name,
+      count: r.count,
+      users: r.users || [],
+    }));
+
     messages.push({
       text: msg.text || '',
       userName,
@@ -223,6 +247,7 @@ export async function getSlackThreadReplies(channelId: string, threadTs: string)
       ts: msg.ts || '',
       threadTs: msg.thread_ts,
       ...(files.length > 0 ? { files } : {}),
+      ...(reactions ? { reactions } : {}),
     });
   }
 

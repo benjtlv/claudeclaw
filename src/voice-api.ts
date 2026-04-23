@@ -7,6 +7,7 @@ import { loadAgentConfig, resolveAgentClaudeMd } from './agent-config.js';
 import {
   VOICE_API_PORT, VOICE_TUNNEL_HOSTNAME, ALLOWED_CHAT_ID, AGENT_ID,
   agentElevenlabsModelId, agentElevenlabsSpeechTags,
+  agentMcpAllowlist,
   ELEVENLABS_MODEL_ID, ELEVENLABS_SPEECH_TAGS,
 } from './config.js';
 import { getSession, setSession } from './db.js';
@@ -121,6 +122,9 @@ export function startVoiceApi(): void {
         () => {},
         undefined,
         'haiku',
+        undefined,
+        undefined,
+        agentMcpAllowlist,
       );
     } catch (err: any) {
       logger.error({ err: err.message, stack: err.stack?.split('\n').slice(0, 3).join('\n') }, '[voice-chat] runAgent failed');

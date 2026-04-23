@@ -755,6 +755,8 @@ function toggleTaskExpand(btn) {
   const isCollapsed = container.style.maxHeight === '150px';
   container.style.maxHeight = isCollapsed ? 'none' : '150px';
   btn.textContent = isCollapsed ? 'Show less' : 'Show more';
+  const taskId = container.dataset.promptId;
+  if (taskId) { isCollapsed ? expandedTasks.add(taskId) : expandedTasks.delete(taskId); }
 }
 
 async function editTaskPrompt(id) {
@@ -793,6 +795,7 @@ async function editTaskPrompt(id) {
 }
 
 let taskEditingId = null;
+const expandedTasks = new Set();
 
 async function loadTasks() {
   if (taskEditingId) return;
@@ -825,7 +828,8 @@ async function loadTasks() {
       const taskBlurClass = taskBlurred ? 'privacy-blur' : '';
       const promptText = escapeHtml(t.prompt);
       const needsExpand = t.prompt.length > 300;
-      const promptContainer = '<div data-prompt-wrapper="' + t.id + '"><div class="text-sm text-white task-prompt ' + taskBlurClass + '" data-section="tasks" data-idx="' + t.id + '" data-prompt-id="' + t.id + '" data-raw-prompt="' + promptText.replace(/"/g, '&quot;') + '" onclick="toggleItemBlur(this)" style="max-height:' + (needsExpand ? '150px' : 'none') + ';overflow:hidden;white-space:pre-wrap;word-break:break-word">' + promptText + '</div>' + (needsExpand ? '<button onclick="toggleTaskExpand(this)" style="background:none;border:none;color:#60a5fa;cursor:pointer;font-size:12px;padding:2px 0;margin-top:4px">Show more</button>' : '') + '</div>';
+      const isExpanded = expandedTasks.has(String(t.id));
+      const promptContainer = '<div data-prompt-wrapper="' + t.id + '"><div class="text-sm text-white task-prompt ' + taskBlurClass + '" data-section="tasks" data-idx="' + t.id + '" data-prompt-id="' + t.id + '" data-raw-prompt="' + promptText.replace(/"/g, '&quot;') + '" onclick="toggleItemBlur(this)" style="max-height:' + (needsExpand && !isExpanded ? '150px' : 'none') + ';overflow:hidden;white-space:pre-wrap;word-break:break-word">' + promptText + '</div>' + (needsExpand ? '<button onclick="toggleTaskExpand(this)" style="background:none;border:none;color:#60a5fa;cursor:pointer;font-size:12px;padding:2px 0;margin-top:4px">' + (isExpanded ? 'Show less' : 'Show more') + '</button>' : '') + '</div>';
       return '<div class="card"><div class="flex justify-between items-start"><div class="flex-1 mr-2">' + promptContainer + agentBadge + '<div class="text-xs text-gray-500 mt-1">' + cronToHuman(t.schedule) + ' &middot; next in <span class="countdown" data-ts="' + t.next_run + '">' + countdown(t.next_run) + '</span>' + runningInfo + '</div></div><div class="flex items-center gap-1">' + editBtn + silentBtn + pauseBtn + deleteBtn + '<span class="pill ' + statusCls + '">' + t.status + '</span></div></div>' + lastResult + '</div>';
     }).join('');
   } catch(e) {

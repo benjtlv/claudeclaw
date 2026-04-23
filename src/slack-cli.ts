@@ -46,7 +46,8 @@ async function main() {
         process.exit(1);
       }
       const limit = parseInt(parseFlag(rest, '--limit') || '15', 10);
-      const messages = await getSlackMessages(channelId, limit);
+      const oldest = parseFlag(rest, '--oldest');
+      const messages = await getSlackMessages(channelId, limit, oldest);
       console.log(JSON.stringify(messages, null, 2));
       break;
     }

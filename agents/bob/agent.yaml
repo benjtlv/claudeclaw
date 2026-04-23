@@ -1,0 +1,12 @@
+name: Bob (Head of Automation)
+description: Owns all external automation -- Supabase functions, Render deployments, Python scripts, and any tooling that connects voice agents to backend systems. Works closely with the Head of Voice AI on voice agent integrations.
+
+telegram_bot_token_env: BOB_BOT_TOKEN
+
+model: claude-opus-4-6
+
+mcp_servers:
+  - supabase-benjaminelkrieff
+  - render
+  - context7
+  - novanest-n8n-mcp

@@ -32,6 +32,7 @@ const envConfig = readEnvFile([
   'VOICE_TUNNEL_CREDENTIALS',
   'VOICE_TWILIO_PHONE_SID',
   'VOICE_OUTBOUND_NUMBER',
+  'MCP_SERVERS',
 ]);
 
 // ── Multi-agent support ──────────────────────────────────────────────
@@ -151,6 +152,11 @@ export const VOICE_TWILIO_PHONE_SID =
 // Ben's phone number for outbound calls (E.164 format, e.g. +1XXXXXXXXXX)
 export const VOICE_OUTBOUND_NUMBER =
   process.env.VOICE_OUTBOUND_NUMBER || envConfig.VOICE_OUTBOUND_NUMBER || '';
+
+// MCP server allowlist for main agent (comma-separated names from .env)
+const mcpServersRaw = process.env.MCP_SERVERS || envConfig.MCP_SERVERS || '';
+export const MCP_SERVERS: string[] | undefined =
+  mcpServersRaw ? mcpServersRaw.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
 
 // Telegram limits
 export const MAX_MESSAGE_LENGTH = 4096;

@@ -5,14 +5,17 @@ import {
   getDueTasks,
   getSession,
   logConversationTurn,
+  logTaskEvent,
   markTaskRunning,
   updateTaskAfterRun,
   resetStuckTasks,
   claimNextMissionTask,
   completeMissionTask,
+  markMissionCallback,
   resetStuckMissionTasks,
   deleteScheduledTask,
 } from './db.js';
+import type { MissionTask } from './db.js';
 import { logger } from './logger.js';
 import { messageQueue } from './message-queue.js';
 import { runAgent } from './agent.js';
@@ -97,7 +100,10 @@ async function runDueTasks(): Promise<void> {
         }
 
         // Run as a fresh agent call (no session — scheduled tasks are autonomous)
-        const result = await runAgent(task.prompt, undefined, () => {}, undefined, undefined, abortController, undefined, agentMcpAllowlist);
+        const runId = `${task.id}-${Math.floor(Date.now() / 1000)}`;
+        logTaskEvent(runId, 'scheduled', schedulerAgentId, 'start', `Prompt: ${task.prompt.slice(0, 500)}`);
+        const result = await runAgent(task.prompt, undefined, () => {}, undefined, undefined, abortController, undefined, agentMcpAllowlist,
+          (eventType, content) => { try { logTaskEvent(runId, 'scheduled', schedulerAgentId, eventType, content); } catch { /* don't break task */ } });
         clearTimeout(timeout);
 
         if (result.aborted) {
@@ -177,13 +183,17 @@ async function runDueMissionTasks(): Promise<void> {
     const timeout = setTimeout(() => abortController.abort(), TASK_TIMEOUT_MS);
 
     try {
-      const result = await runAgent(mission.prompt, undefined, () => {}, undefined, undefined, abortController, undefined, agentMcpAllowlist);
+      const runId = `mission-${mission.id}-${Math.floor(Date.now() / 1000)}`;
+      logTaskEvent(runId, 'mission', schedulerAgentId, 'start', `${mission.title}: ${mission.prompt.slice(0, 500)}`);
+      const result = await runAgent(mission.prompt, undefined, () => {}, undefined, undefined, abortController, undefined, agentMcpAllowlist,
+        (eventType, content) => { try { logTaskEvent(runId, 'mission', schedulerAgentId, eventType, content); } catch { /* don't break task */ } });
       clearTimeout(timeout);
 
       if (result.aborted) {
         completeMissionTask(mission.id, null, 'failed', 'Timed out after 10 minutes');
         logger.warn({ missionId: mission.id }, 'Mission task timed out');
         try { await sender('Mission task timed out: "' + mission.title + '"'); } catch {}
+        void fireMissionCallback(mission, 'failed', null, 'Timed out after 10 minutes');
       } else {
         const text = result.text?.trim() || 'Task completed with no output.';
         completeMissionTask(mission.id, text, 'completed');
@@ -200,6 +210,8 @@ async function runDueMissionTasks(): Promise<void> {
           logConversationTurn(ALLOWED_CHAT_ID, 'user', '[Mission task: ' + mission.title + ']: ' + mission.prompt, activeSession ?? undefined, schedulerAgentId);
           logConversationTurn(ALLOWED_CHAT_ID, 'assistant', text, activeSession ?? undefined, schedulerAgentId);
         }
+
+        void fireMissionCallback(mission, 'completed', text, null);
       }
 
       emitChatEvent({
@@ -216,10 +228,85 @@ async function runDueMissionTasks(): Promise<void> {
       const errMsg = err instanceof Error ? err.message : String(err);
       completeMissionTask(mission.id, null, 'failed', errMsg.slice(0, 500));
       logger.error({ err, missionId: mission.id }, 'Mission task failed');
+      void fireMissionCallback(mission, 'failed', null, errMsg.slice(0, 500));
     } finally {
       runningTaskIds.delete(missionKey);
     }
   });
+}
+
+/**
+ * POST the completion webhook for a mission task if one is configured.
+ * Merges caller-supplied payload with task outcome fields and retries
+ * up to 3 times with exponential backoff. Never throws.
+ */
+async function fireMissionCallback(
+  mission: MissionTask,
+  status: 'completed' | 'failed',
+  result: string | null,
+  error: string | null,
+): Promise<void> {
+  if (!mission.callback_url) return;
+
+  let userPayload: Record<string, unknown> = {};
+  let userHeaders: Record<string, string> = {};
+  try {
+    if (mission.callback_payload) userPayload = JSON.parse(mission.callback_payload);
+  } catch (e) {
+    logger.warn({ missionId: mission.id, err: e }, 'Invalid callback_payload JSON, sending empty');
+  }
+  try {
+    if (mission.callback_headers) userHeaders = JSON.parse(mission.callback_headers);
+  } catch (e) {
+    logger.warn({ missionId: mission.id, err: e }, 'Invalid callback_headers JSON, ignoring');
+  }
+
+  const body = JSON.stringify({
+    ...userPayload,
+    task_id: mission.id,
+    title: mission.title,
+    assigned_agent: mission.assigned_agent,
+    status,
+    result,
+    error,
+    completed_at: Math.floor(Date.now() / 1000),
+  });
+
+  const method = mission.callback_method || 'POST';
+  const maxAttempts = 3;
+  let attempt = 0;
+  let lastErr = '';
+
+  while (attempt < maxAttempts) {
+    attempt++;
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15_000);
+      const res = await fetch(mission.callback_url, {
+        method,
+        headers: { 'Content-Type': 'application/json', ...userHeaders },
+        body,
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      if (res.ok) {
+        markMissionCallback(mission.id, 'sent', attempt);
+        logger.info({ missionId: mission.id, attempt, status: res.status }, 'Mission callback delivered');
+        return;
+      }
+      lastErr = `HTTP ${res.status}`;
+    } catch (e) {
+      lastErr = e instanceof Error ? e.message : String(e);
+    }
+
+    if (attempt < maxAttempts) {
+      await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
+    }
+  }
+
+  markMissionCallback(mission.id, 'failed', attempt);
+  logger.error({ missionId: mission.id, attempts: attempt, err: lastErr }, 'Mission callback failed');
 }
 
 export function computeNextRun(cronExpression: string): number {

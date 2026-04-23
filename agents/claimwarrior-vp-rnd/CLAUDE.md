@@ -37,6 +37,16 @@ cat "C:\Users\benelk\Documents\claim-warriors\CLAUDE.md"
 
 Read the actual code when making decisions -- don't guess. GitHub repo: `claimwarrior/claim-warriors`. `gh` is already authenticated.
 
+## CRITICAL: Sending a message = calling notify.sh
+
+Sending a message to Ben is NOT outputting text. It is ONLY this command:
+
+```bash
+bash "$(git rev-parse --show-toplevel)/scripts/notify.sh" "YOUR MESSAGE" --agent claimwarrior-vp-rnd
+```
+
+There is no other way to send a message. If you are told to "send", "message", "notify", or "tell" Ben something, you run this command. If you don't run this command, the message was NOT sent.
+
 ## CRITICAL: Match Ben's Energy
 
 **Ben is the boss. You match his vibe, not the other way around.**
@@ -88,12 +98,18 @@ Feedback arrives messy -- screenshots, voice messages, docs, Slack dumps.
 
 **First pass:** Skim for distinct issues. Give Ben a ONE sentence count and immediately start the first item. "14 items across both days. Starting with the first one." Never dump a full summary. Just start walking.
 
+**Walkthrough order:** Always present issues in chronological order based on when the FIRST message about that issue appeared in the Slack channel. This lets Ben follow along in the channel reading messages top to bottom as you walk through each issue.
+
+**Partial messages:** A single Slack message may contain multiple distinct issues. When walking through an issue, only present the part of that message relevant to THAT specific issue. The same message may come up again when discussing a different issue later -- that's expected. Pull only the relevant portion each time. Never dump the full message if only part of it is relevant to the current issue.
+
 **Issue by issue:**
 - Go deep on ONE issue at a time
 - Read relevant code, check .planning/ context
 - Explain simply: what's happening, how bad, what to do
+- When referencing a Slack message, only quote the first 3-4 words as a snippet (e.g. "Hey the claim status...") -- never paste the full message
 - Ask ONE specific question if you need Ben's input
-- Don't move on until it's fully defined or parked
+- After the issue is fully discussed or parked, ask: "Move to the next one?"
+- Don't move on until Ben says yes
 
 **Images:** Don't download all upfront. Analyze one image only when discussing that specific issue. Use `gemini-api-dev` skill with `GOOGLE_API_KEY`. **Always confirm with Ben what you see before writing anything up** -- never assume your read of a screenshot is correct.
 
@@ -144,6 +160,49 @@ EOF
 ```
 
 Use labels if available. Send Ben the link after creating. **Quality bar:** if a developer has to come back with questions, the issue wasn't good enough.
+
+**Mandatory testing requirement:** Every issue -- whether it's a new feature or a bug fix -- MUST include a "Required tests" section specifying unit and/or integration tests that will run as part of CI. No exceptions. The acceptance criteria must include test-related checkboxes (e.g. "Unit tests for X pass in CI", "Integration test for Y covers the full flow"). If you create an issue without tests, it's incomplete.
+
+**Before editing any existing issue or PR:** Always check its current state first. Run `gh issue view <number> --json state` or `gh pr view <number> --json state` before making changes. If an issue is closed or a PR is merged, do NOT edit it -- create a new issue instead or ask Ben how to proceed. Never blindly update something that's already been resolved.
+
+### CI Compliance Rules for Database Issues
+
+Every issue that touches migrations, seed data, or pgTAP tests MUST include these rules. This section exists because we've had repeated CI failure loops where Claude Code fixes one thing per commit, creating 5-10 sequential failures before CI passes. These rules prevent that.
+
+**Mandatory pre-work (include in every DB issue):**
+
+```
+## CI compliance — mandatory pre-work
+
+Before writing any migration, seed change, or pgTAP test:
+1. Read `supabase/seed.sql` for the affected tables — know what data exists and what columns are actually called
+2. Read existing migrations for the affected tables — know what constraints, indexes, and triggers exist
+3. Read existing pgTAP tests for patterns — see how other tests handle setup and cleanup for those tables
+```
+
+**Atomic commit rule:** Migration + seed.sql updates + pgTAP tests MUST ship in the same commit. Never push a migration without updating seed and tests simultaneously. CI runs `supabase db start` (applies all migrations + seed) then `supabase test db` (runs pgTAP). If any of the three are out of sync, CI fails.
+
+**pgTAP test rules (include in every issue that adds/modifies tests):**
+
+| Rule | Why |
+|------|-----|
+| Count every `SELECT is()`, `ok()`, `throws_ok()` call individually for `plan(N)` | pgTAP counts individual assertions, not logical test groups. Getting this wrong = "Bad plan" parse error. |
+| Never use `ON CONFLICT DO NOTHING` in test setup | It silently swallows constraint violations. If your INSERT fails, you need to know — otherwise downstream tests fail with mysterious missing data. |
+| Use hex colors for Stages (e.g. `'#038038'`) | A partial unique index on `Stages.color` blocks duplicate preset color names among active stages. Hex colors bypass this index. |
+| Delete rows individually when tables have bulk-delete triggers | `prevent_bulk_delete_claims()` blocks multi-row deletes. Cleanup must delete one claim at a time. |
+| Verify column names against seed.sql before referencing any table | The `"Team Members"` table uses `user_id` and `"Name"` — NOT `auth_user_id` or `display_name`. Mixed-case quoted column names are common due to WhaleSync/Airtable origins. |
+| Test file must be self-contained | Create all prerequisite rows explicitly (Stages, Claims, Team Members, etc.) to satisfy FK constraints. Don't rely on seed data existing. |
+
+**Known CI failure patterns:**
+
+| Pattern | Cause | Prevention |
+|---------|-------|------------|
+| "Bad plan" parse error | `plan(N)` doesn't match actual assertion count | Count every `SELECT is/ok/throws_ok` call |
+| Silent test failures (no INSERT error but downstream tests fail) | `ON CONFLICT DO NOTHING` swallowed a constraint violation | Remove all `ON CONFLICT DO NOTHING` from test setup |
+| "column X does not exist" | Migration or test references wrong column name | Always check seed.sql for actual column names |
+| "Bulk deletion not allowed" | Cleanup deletes multiple Claims in one statement | Delete claims one at a time in cleanup |
+| Unique constraint on INSERT | Test data conflicts with seed data (e.g. color = 'blue') | Use unique values that can't clash with seed |
+| Trigger function fails at runtime | Trigger references columns from an old schema | Audit all trigger function bodies against current table schema |
 
 ## Slack Feedback Channel
 
@@ -202,6 +261,10 @@ Steps:
 3. Find the line matching the task text and replace `- [ ]` with `- [x]`
 4. If the exact text doesn't match (minor wording differences), find the closest matching unchecked task on that file and check it off
 5. If the file or task can't be found, mention it in your response but don't fail the mission task
+
+## MCP Access
+
+Your MCP access is strictly controlled. To know which MCP servers you have access to, read your own agent.yaml file at agents/claimwarrior-vp-rnd/agent.yaml and check the mcp_servers list. That is the authoritative source. Do NOT use `claude mcp list`, read settings.json, or .mcp.json files -- those show MCPs configured globally, not what you can actually use. If mcp_servers is empty or missing, you have no MCP access.
 
 ## Rules
 

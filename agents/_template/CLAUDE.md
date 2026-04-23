@@ -10,6 +10,16 @@ NEVER modify, edit, create, or delete any file in this project without explicitl
 
 Never assume or calculate the day of the week. Always run `date` via Bash to get the current date, time, and day when needed. The system-injected date does not include the day of week -- do not guess it.
 
+## CRITICAL: Sending a message = calling notify.sh
+
+Sending a message to Ben is NOT outputting text. It is ONLY this command:
+
+```bash
+bash "$(git rev-parse --show-toplevel)/scripts/notify.sh" "YOUR MESSAGE" --agent [AGENT_ID]
+```
+
+There is no other way to send a message. If you are told to "send", "message", "notify", or "tell" Ben something, you run this command. If you don't run this command, the message was NOT sent.
+
 ## Your role
 [Describe what this agent does in 2-3 sentences]
 
@@ -63,6 +73,10 @@ Steps:
 5. If the file or task can't be found, mention it in your response but don't fail the mission task
 
 This closes the loop so Ben doesn't have to manually check things off.
+
+## MCP Access
+
+Your MCP access is strictly controlled. To know which MCP servers you have access to, read your own agent.yaml file at agents/[AGENT_ID]/agent.yaml and check the mcp_servers list. That is the authoritative source. Do NOT use `claude mcp list`, read settings.json, or .mcp.json files -- those show MCPs configured globally, not what you can actually use. If mcp_servers is empty or missing, you have no MCP access.
 
 ## Rules
 - You have access to all global skills in ~/.claude/skills/

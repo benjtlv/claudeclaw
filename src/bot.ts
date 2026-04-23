@@ -3,7 +3,7 @@ import path from 'path';
 import os from 'os';
 import { Api, Bot, Context, InputFile, RawApi } from 'grammy';
 
-import { runAgent, UsageInfo, AgentProgressEvent } from './agent.js';
+import { runAgent, UsageInfo, AgentProgressEvent, AgentEventCallback } from './agent.js';
 import {
   AGENT_ID,
   ALLOWED_CHAT_ID,
@@ -25,7 +25,7 @@ import {
   AGENT_TIMEOUT_MS,
   STREAM_STRATEGY,
 } from './config.js';
-import { clearSession, getRecentConversation, getRecentMemories, getRecentTaskOutputs, getSession, getSessionConversation, logToHiveMind, pinMemory, unpinMemory, setSession, lookupWaChatId, saveWaMessageMap, saveTokenUsage } from './db.js';
+import { clearSession, getRecentConversation, getRecentMemories, getRecentMissionOutputs, getRecentTaskOutputs, getSession, getSessionConversation, logTaskEvent, logToHiveMind, pinMemory, unpinMemory, setSession, lookupWaChatId, saveWaMessageMap, saveTokenUsage } from './db.js';
 import { logger } from './logger.js';
 import { downloadMedia, buildPhotoMessage, buildDocumentMessage, buildVideoMessage } from './media.js';
 import { buildMemoryContext, evaluateMemoryRelevance, saveConversationTurn } from './memory.js';
@@ -548,6 +548,15 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
     parts.push(`[Recent scheduled task context — the user may be replying to this]\n${taskLines.join('\n\n')}\n[End task context]`);
   }
 
+  const recentMissions = getRecentMissionOutputs(AGENT_ID, 30);
+  if (recentMissions.length > 0) {
+    const missionLines = recentMissions.map((m) => {
+      const ago = Math.round((Date.now() / 1000 - m.completed_at) / 60);
+      return `[Mission task completed ${ago}m ago]\nTitle: ${m.title}\nTask: ${m.prompt}\nResult:\n${m.result}`;
+    });
+    parts.push(`[Recent mission task context — the user may be replying to this]\n${missionLines.join('\n\n')}\n[End mission context]`);
+  }
+
   parts.push(message);
   const fullMessage = parts.join('\n\n');
 
@@ -628,6 +637,12 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
       }
     } : undefined;
 
+    const directRunId = `direct-${chatIdStr}-${Math.floor(Date.now() / 1000)}`;
+    logTaskEvent(directRunId, 'direct', AGENT_ID, 'start', `Message: ${message.slice(0, 500)}`);
+    const onEventDirect: AgentEventCallback = (eventType, content) => {
+      try { logTaskEvent(directRunId, 'direct', AGENT_ID, eventType, content); } catch { /* don't break message */ }
+    };
+
     const result = await runAgent(
       fullMessage,
       sessionId,
@@ -637,6 +652,7 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
       abortCtrl,
       onStreamText,
       agentMcpAllowlist,
+      onEventDirect,
     );
 
     clearTimeout(timeoutId);
@@ -954,6 +970,8 @@ export function createBot(): Bot {
             undefined,
             undefined,
             summaryAbort,
+            undefined,
+            agentMcpAllowlist,
           );
           clearTimeout(summaryTimer);
 
@@ -1637,6 +1655,9 @@ async function processDashboardMessage(
       abortCtrl.abort();
     }, AGENT_TIMEOUT_MS);
 
+    const dashRunId = `dash-${chatIdStr}-${Math.floor(Date.now() / 1000)}`;
+    logTaskEvent(dashRunId, 'direct', AGENT_ID, 'start', `Dashboard: ${text.slice(0, 500)}`);
+
     const result = await runAgent(
       fullMessage,
       sessionId,
@@ -1646,6 +1667,7 @@ async function processDashboardMessage(
       abortCtrl,
       undefined, // no streaming for dashboard
       agentMcpAllowlist,
+      (eventType, content) => { try { logTaskEvent(dashRunId, 'direct', AGENT_ID, eventType, content); } catch { /* */ } },
     );
 
     clearTimeout(dashTimeout);

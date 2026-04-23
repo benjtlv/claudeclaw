@@ -48,7 +48,9 @@
       "Edit(~/.claude/skills/voice-ai-prototype/**)",
       "Bash(pip3 install:*)",
       "Bash(git -C \"/Users/benjaminelkrieff/Documents/Claude Code Master Folder/claudeclaw\" rev-parse --show-toplevel)",
-      "Bash(sqlite3 __TRACKED_VAR__/store/claudeclaw.db 'SELECT session_id FROM sessions LIMIT 1;')"
+      "Bash(sqlite3 __TRACKED_VAR__/store/claudeclaw.db 'SELECT session_id FROM sessions LIMIT 1;')",
+      "Bash(git mv *)",
+      "Bash(mv .claude/skills/voice-ai-improve-prompt-with-pr .claude/skills/voice-ai-improve-prompt)"
     ],
     "additionalDirectories": [
       "/Users/benjaminelkrieff/.claude/skills/voice-agent-builder"

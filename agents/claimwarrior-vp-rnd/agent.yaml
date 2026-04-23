@@ -5,6 +5,11 @@ telegram_bot_token_env: CLAIMWARRIOR_BOT_TOKEN
 
 model: claude-opus-4-6
 
+mcp_servers:
+  - Ghl-mcp-claim-warrior
+  - Supabase-claim-warrior
+  - airtable-claim-warrior
+
 # Obsidian integration -- product knowledge base
 obsidian:
   vault: C:\Users\benelk\Documents\claim-warriors

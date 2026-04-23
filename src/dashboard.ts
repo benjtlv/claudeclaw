@@ -199,6 +199,12 @@ export function startDashboard(botApi?: Api<RawApi>): void {
       prompt?: string;
       assigned_agent?: string;
       priority?: number;
+      callback?: {
+        url?: string;
+        method?: string;
+        headers?: Record<string, string>;
+        payload?: Record<string, unknown>;
+      };
     }>();
 
     const title = body?.title?.trim();
@@ -217,8 +223,33 @@ export function startDashboard(botApi?: Api<RawApi>): void {
       }
     }
 
+    // Validate callback if provided
+    let callback: { url: string; method?: string; headers?: Record<string, string>; payload?: Record<string, unknown> } | null = null;
+    if (body?.callback) {
+      const cbUrl = body.callback.url?.trim();
+      if (!cbUrl) return c.json({ error: 'callback.url required when callback is provided' }, 400);
+      try {
+        const parsed = new URL(cbUrl);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          return c.json({ error: 'callback.url must be http(s)' }, 400);
+        }
+      } catch {
+        return c.json({ error: 'callback.url is not a valid URL' }, 400);
+      }
+      const method = (body.callback.method ?? 'POST').toUpperCase();
+      if (!['POST', 'PUT', 'PATCH'].includes(method)) {
+        return c.json({ error: 'callback.method must be POST, PUT, or PATCH' }, 400);
+      }
+      callback = {
+        url: cbUrl,
+        method,
+        headers: body.callback.headers,
+        payload: body.callback.payload,
+      };
+    }
+
     const id = crypto.randomBytes(4).toString('hex');
-    createMissionTask(id, title, prompt, assignedAgent, 'dashboard', priority);
+    createMissionTask(id, title, prompt, assignedAgent, 'dashboard', priority, callback);
 
     const task = getMissionTask(id);
     return c.json({ task }, 201);
