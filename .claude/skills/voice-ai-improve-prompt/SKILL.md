@@ -70,29 +70,48 @@ Fail fast if the local clone has uncommitted changes (`git status --porcelain` i
 
 In `--with-pr` mode, do Step C' (branch checkout) before Step B so edits land on the feature branch, not on `main`.
 
+### Step B0 — Consult shared references
+
+Before editing, classify the improvement and read the matching reference(s) from `.claude/voice-ai-shared/`. These are the canonical patterns every voice agent in this repo follows — consult them so iterations stay consistent with what `voice-ai-prototype` originally produced. Skip references that don't apply.
+
+| Improvement involves | Read first |
+|---|---|
+| Speech examples, filler words, tone, response length, language to avoid, AI over-reaction calibration, never-restate / never-recap rules, pronunciation rules (prices, times, emails, URLs, brand names) | [../../voice-ai-shared/references/speech-patterns.md](../../voice-ai-shared/references/speech-patterns.md) |
+| Retell platform syntax — `--` pause marker, `NO_RESPONSE_NEEDED`, `{{variable}}` injection, `~text~` developer instructions, `~call function~` invocations. Also: agent verbalising "dash dash" or talking over caller after a question | [../../voice-ai-shared/references/retell-conventions.md](../../voice-ai-shared/references/retell-conventions.md) |
+| Qualification gates, IF/ONLY IF logic, transfer authorization, info-collection structure, variables | [../../voice-ai-shared/references/qualification-framework.md](../../voice-ai-shared/references/qualification-framework.md) |
+| Booking flow, calendar functions, AM/PM rules, no-show prevention | [../../voice-ai-shared/references/appointment-setting.md](../../voice-ai-shared/references/appointment-setting.md) |
+| Editing a Trojan prompt (filename ends `-trojan.md`): segue, missed-calls math, frame-flip, deploy-tonight, sales-side objections | [../../voice-ai-shared/references/trojan-horse.md](../../voice-ai-shared/references/trojan-horse.md) and [../../voice-ai-shared/assets/voice-agent-template-trojan-overlay.md](../../voice-ai-shared/assets/voice-agent-template-trojan-overlay.md) |
+| Restructuring whole sections, rebuilding from a bad prompt, re-deriving section order | [../../voice-ai-shared/assets/voice-agent-template.md](../../voice-ai-shared/assets/voice-agent-template.md) |
+| Adding new content from the user (FAQs, price sheets, policies, rosters, hours, etc.), or noticing the current prompt has duplicated reference content that's also in a KB | [../../voice-ai-shared/references/knowledge-base-split.md](../../voice-ai-shared/references/knowledge-base-split.md) — classify the new or duplicated content as **behavioral** (→ prompt) or **reference** (→ KB) *before* editing. Never both. If you spot a "quick reference" mirror in the prompt of something already in a KB, delete it in this edit. |
+| Writing or editing **any** `kb-*.txt` file (new or existing) | [../../voice-ai-shared/references/faq-format.md](../../voice-ai-shared/references/faq-format.md) — every KB file must be in Topic/Question/Answer FAQ format |
+
+If the improvement is purely cosmetic (typo, formatting, single-word swap) or doesn't fall in any category above, skip Step B0 entirely and go straight to Step B.
+
 ### Step B — Apply the edit
 
-Read the current contents of the prompt file. Apply the user's instruction as a surgical edit (prefer `Edit` over full rewrites). If the instruction genuinely requires restructuring, do a full rewrite, but keep the intent faithful.
+Read the current contents of the prompt file. Apply the user's instruction as a surgical edit (prefer `Edit` over full rewrites). If the instruction genuinely requires restructuring, do a full rewrite, but keep the intent faithful. Stay aligned with whatever pattern docs you read in Step B0 — don't invent a new style if a canonical one exists.
 
 A minimal, focused diff is much easier to scan after the fact (direct mode) or review in GitLab (PR mode), so default to the smallest change that satisfies the instruction.
 
-### Step B2 — Knowledge base decisions
+### Step B2 — Write or update knowledge base files
 
-Check whether the user's request involves adding supporting data (the user attached or referenced an FAQ doc, price sheet, catalog, policy, location list, insurance carrier list, long background material) **or** whether the edited prompt is now trending above ~10,000 tokens (estimate with `chars / 4`).
+The split decision was already made in Step B0 — here you just produce or update the files.
 
-If either is true, read [references/knowledge-base-split.md](references/knowledge-base-split.md) and decide whether to move content into sibling `kb-*.txt` files. Non-negotiables: role, personality, steps, rules, objection handling, and appointment-setting logic **always stay in the main prompt** regardless of size. Only pure reference data the agent consults on specific caller questions is a candidate. If the prompt needs to exceed 10k to stay accurate, let it — never sacrifice correctness for tokens.
+If Step B0 flagged no reference content (the improvement was purely behavioral), **skip this step**.
 
-When you do split:
-- Save each KB file as plain `.txt` alongside the prompt (same client folder), named `kb-<topic>.txt` (e.g., `kb-faqs.txt`, `kb-pricing.txt`).
-- Remove the split content from the main prompt entirely — no duplicate summary.
-- Add or update a short `## Knowledge Base` section near the bottom of the prompt (above Notes) listing each KB file and when to consult it.
-- On later runs, if a `kb-*.txt` already exists, prefer editing it in place rather than duplicating content back into the prompt.
+Otherwise, for each reference chunk identified in Step B0:
 
-If neither condition applies, skip this sub-step.
+1. Read [../../voice-ai-shared/references/faq-format.md](../../voice-ai-shared/references/faq-format.md) and convert the source content to the canonical Topic/Question/Answer FAQ format. Never paste raw prose into a `kb-*.txt`.
+2. Save each KB file as plain `.txt` alongside the prompt (same client folder), named `kb-<topic>.txt` (e.g., `kb-faqs.txt`, `kb-pricing.txt`).
+3. If a `kb-*.txt` already exists for this topic, edit it in place rather than creating a parallel file. If the existing file is still in raw prose, convert it to FAQ format in the same edit.
+
+**Verify no duplication.** Re-scan the prompt after your edit. If you spot any section that mirrors content now in a KB — a "Quick Reference" block, a compressed pricing/hours/roster summary, an inline policy paragraph — delete it from the prompt in this same commit. The prompt must contain zero copies of anything that lives in a KB.
+
+**Add or update the `## Knowledge Base` pointer section** near the bottom of the prompt (above Notes) so each KB file is listed with what's in it and when to consult it. Format per [../../voice-ai-shared/references/knowledge-base-split.md](../../voice-ai-shared/references/knowledge-base-split.md). One line per KB — navigation only.
 
 ## Direct mode (default): push to main + redeploy Retell
 
-Order of operations: Step A → Step B → Step B2 → Step C → Step D → Step E.
+Order of operations: Step A → Step B0 → Step B → Step B2 → Step C → Step D → Step E.
 
 ### Step C — Commit and push to main
 
@@ -131,7 +150,7 @@ If the Retell redeploy failed, say so explicitly and include the error.
 
 ## `--with-pr` mode: branch + merge request
 
-Order of operations: Step A → Step C' → Step B → Step B2 → Step D' → Step E'.
+Order of operations: Step A → Step C' → Step B0 → Step B → Step B2 → Step D' → Step E'.
 
 ### Step C' — Ensure the branch exists and is checked out
 
