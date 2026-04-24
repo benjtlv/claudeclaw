@@ -1,6 +1,6 @@
 ---
 name: voice-ai-improve-prompt
-description: Iterate on a voice AI agent prompt in the novanest-ai/ai_prompts GitLab repo. Default mode pushes the improvement straight to main and redeploys the Retell LLM. `--with-pr` mode pushes to a per-prompt branch and opens a merge request instead. Use this skill whenever the user wants to improve, iterate on, edit, or revise a voice AI prompt — phrasings like "update the prompt for <client>", "improve John Giordani's prompt", "push prompt changes", "iterate on the voice agent prompt", or any request that implies editing a prompt under CLIENTS/DEMOS/PROSPECTS/INTERNAL. Only take the `--with-pr` path when the user explicitly asks for a PR, MR, or merge request; otherwise default to the direct-to-main + redeploy path. Prefer this skill over plain git/glab commands for any voice-AI-prompt iteration.
+description: Iterate on a voice AI agent prompt in the novanest-ai/ai_prompts GitLab repo. **Direct mode** (default): commit straight to main and redeploy the Retell LLM. **`--with-pr` mode**: commit to a per-prompt branch and open or extend a merge request. **Review mode**: when the user points at an open MR and asks to apply its unresolved inline comments, the skill fetches each comment, applies the edit, commits, pushes, replies "done", and resolves the discussion. Use this skill whenever the user wants to improve, iterate on, edit, or revise a voice AI prompt — phrasings like "update the prompt for <client>", "improve John Giordani's prompt", "push prompt changes", "iterate on the voice agent prompt", "apply the unresolved comments on MR !42", "pull feedback from <MR url>", "review mode on <MR>", or any request that implies editing a prompt under CLIENTS/DEMOS/PROSPECTS/INTERNAL. Only take the `--with-pr` path when the user explicitly asks for a PR, MR, or merge request; review mode triggers when the user references an MR and asks for its comments to be applied. Otherwise default to direct mode. Prefer this skill over plain git/glab commands for any voice-AI-prompt iteration.
 ---
 
 # Voice AI — Improve Prompt
@@ -11,16 +11,18 @@ Takes a user instruction describing how to improve a voice AI prompt, and in a s
 
 1. Resolves the target prompt file inside `C:\Users\benelk\Documents\ai_prompts`.
 2. Applies the requested improvement (and, if relevant, splits knowledge-base content into sibling `kb-*.txt` files — see Step B2).
-3. Ships the change via one of two modes:
+3. Ships the change via one of three modes:
    - **Default (direct mode)**: commit to `main`, push, then redeploy the Retell LLM so the live agent picks up the change immediately.
-   - **`--with-pr` mode**: commit to a per-prompt branch, push, and open a merge request against `main`. No Retell redeploy — that happens after the MR is merged, out of band.
+   - **`--with-pr` mode**: commit to a per-prompt branch, push, and open (or extend) a merge request against `main`. No Retell redeploy — that happens after the MR is merged, out of band.
+   - **Review mode**: the instructions come from an MR's unresolved inline comments instead of from chat. The skill fetches the comments, applies them, commits + pushes to the MR branch, and replies + resolves each comment.
 
-The design assumption is that the user provides **everything at once** — client/category, which prompt file, and what to change. If anything is ambiguous, clarify before touching the repo.
+The design assumption for direct and `--with-pr` modes is that the user provides **everything at once** — client/category, which prompt file, and what to change. For review mode, the user just provides the MR reference and the comments carry the instructions. If anything is ambiguous, clarify before touching the repo.
 
 ## Choosing the mode
 
 - **Default to direct mode.** If the user just says "improve the prompt for X" / "update John Giordani's prompt" / "add a rebuttal to the pricing section", ship straight to `main` and redeploy Retell.
-- **Only use `--with-pr` when the user explicitly asks for it** — phrases like "with a PR", "open a merge request", "don't push to main", "review first", "--with-pr". If there's any doubt, default to direct mode; the user knows to ask for a PR when they want one.
+- **Use `--with-pr` when the user explicitly asks for it** — phrases like "with a PR", "open a merge request", "don't push to main", "review first", "--with-pr". If there's any doubt, default to direct mode; the user knows to ask for a PR when they want one.
+- **Use review mode when the user points at an open MR and asks to apply its comments** — phrases like "apply the unresolved comments on MR !42", "pull feedback from <MR url>", "review mode on <MR>", "apply the comments". Trigger is unambiguous — there's an MR reference and an ask to consume its comments as instructions. Skip if the user is just asking about the MR without asking to act on comments.
 
 ## Repo facts (do not re-derive)
 
@@ -212,6 +214,131 @@ If the MR already existed, say "MR already open" instead of creating a new one.
 
 Do **not** update the Retell LLM in this mode. The redeploy happens after the MR is merged, out of band.
 
+## Review mode: apply unresolved MR comments
+
+Use this mode when the user references an open MR and asks for its unresolved inline comments to be applied as edits. The comments carry the instructions — you don't need separate free-text guidance from the user.
+
+Order of operations: Step A → Step C'' → Step R1 → Step R2 → [per comment: Step B0 → Step B → Step B2] → Step D' → Step R3 → Step F''.
+
+### Step C'' — Resolve MR and check out its source branch
+
+1. Parse the MR reference from the user's input. Accept any of:
+   - A full URL: `https://gitlab.com/novanest-ai/ai_prompts/-/merge_requests/42`
+   - Bang-prefixed number: `!42`
+   - Plain number: `42`
+2. Fetch MR metadata to find the source branch:
+   ```bash
+   glab mr view <iid> --output json | jq -r '.source_branch'
+   ```
+3. Sync local main first (Step A rules still apply — no uncommitted changes), then:
+   ```bash
+   git fetch origin <source_branch>
+   git checkout <source_branch>
+   git pull --ff-only origin <source_branch>
+   ```
+
+If the MR is closed or merged, stop and tell the user — you can't add commits.
+
+### Step R1 — Fetch unresolved inline comments
+
+```bash
+glab api "projects/novanest-ai%2Fai_prompts/merge_requests/<iid>/discussions" \
+  | jq '[.[] | select(
+      .notes[0].resolvable == true
+      and .notes[0].resolved == false
+      and .notes[0].position != null
+    )]'
+```
+
+Capture for each discussion:
+- `id` — discussion ID (used to resolve later)
+- `notes[0].id` — note ID (used for replies)
+- `notes[0].body` — the instruction text
+- `notes[0].position.new_path` — file the comment anchors to
+- `notes[0].position.new_line` — line number in the new version
+
+**Only inline comments (`position != null`) are auto-applicable.** General MR-level comments don't have line anchors — surface them to the user at the end as "heads up, there are N general comments that need your attention", don't try to guess what they mean.
+
+If there are no unresolved inline comments, say so and stop.
+
+### Step R2 — Plan pass
+
+Group comments by file. Surface the plan tersely (2-6 lines total) before applying anything so the user can catch a misread:
+
+> Found 4 unresolved inline comments on MR !42:
+>
+>   CLIENTS/JOHN GIORDANI/prompt.md
+>     L38:  "make this tighter — one sentence not three"
+>     L112: "replace with 'warmth not buddy energy'"
+>     L145: "delete this sentence, it contradicts the rule above"
+>     L203: "typo — 'balayge' should be 'balayage'"
+>
+> Apply all four in one commit?
+
+Wait for go/no-go. If the user wants to skip any, respect that list. If they want you to handle some and defer others, apply the ones they pick and leave the rest unresolved.
+
+### Per-comment edit loop
+
+For each comment you're applying:
+
+1. **Classify** via Step B0 lookup — if the comment is about speech/tone, consult `speech-patterns.md`; if about qualification, `qualification-framework.md`; about a KB file, `faq-format.md` and `knowledge-base-split.md`; etc. Same rules as a normal `--with-pr` run.
+2. **Apply the edit** per Step B — use the comment's line number to locate the anchor; prefer surgical `Edit` over rewrites. If the line has shifted due to prior commits on the branch, search for the surrounding context in the current file.
+3. **If the comment touches KB content**, apply Step B2 mechanics (FAQ format, no duplication, update `## Knowledge Base` pointer).
+4. **If you can't apply a comment cleanly** (truly ambiguous, conflicts with another comment, asks for something that requires your judgment), skip it and note why — you'll leave that discussion unresolved and reply with what you saw.
+
+### Step D' — Commit and push (same as `--with-pr` mode)
+
+One commit for all applied comments. Stage the prompt file plus any `kb-*.txt` files you touched:
+
+```bash
+git add "<prompt-file-path>" "<any kb-*.txt paths you touched>"
+git commit -m "improve(<prompt-slug>): apply MR !<iid> review comments"
+git push origin <source_branch>
+```
+
+The commit appears in the MR thread automatically — no second MR, no second branch.
+
+### Step R3 — Reply and resolve each handled comment
+
+For each discussion you applied:
+
+```bash
+# Reply confirming the change
+glab api "projects/novanest-ai%2Fai_prompts/merge_requests/<iid>/discussions/<discussion_id>/notes" \
+  -X POST -f body="Done in <short-sha>."
+
+# Resolve the discussion
+glab api "projects/novanest-ai%2Fai_prompts/merge_requests/<iid>/discussions/<discussion_id>" \
+  -X PUT -f resolved=true
+```
+
+For comments you **couldn't** apply: reply with what you interpreted and why you skipped it, **do not resolve**. Example reply: `"Skipped — line 145 could mean delete either the full sentence or just the clause after the comma. Clarify and I'll apply."`
+
+### Step F'' — Report back (review mode)
+
+```
+MR !42 — CLIENTS/JOHN GIORDANI/prompt.md
+Applied:   3 of 4 comments
+Skipped:   1 (L145, ambiguous — replied asking for clarification, left unresolved)
+General:   0 non-inline comments
+Commit:    <short-sha> pushed to <source-branch>
+MR URL:    https://gitlab.com/novanest-ai/ai_prompts/-/merge_requests/42
+```
+
+If there were general (non-inline) MR comments, list them here so the user can address them manually.
+
+### Review mode edge cases
+
+- **MR is closed or merged** → stop, tell the user, don't try to add commits.
+- **Source branch has diverged from what your local knows about** — the fetch + pull in Step C'' handles it; if the pull isn't fast-forward, stop and surface the conflict rather than force-overwriting.
+- **Comment line has moved because of prior commits** — use the comment body to find the anchor text in the current file; apply if found, reply with "couldn't locate the original line, my best guess is X, please confirm" if not.
+- **Two comments conflict** (one says delete X, another says edit X) — apply the later-dated comment, reply to both explaining which won.
+- **A comment asks for something outside the prompt file** (e.g. "also update the kb-faqs.txt") — `position.new_path` tells you which file; follow the same loop for that file.
+- **A comment is vague** ("this doesn't feel right", "tighten") — apply your best interpretation, note it in the reply so the user can push back if you got it wrong.
+- **All comments are general (no inline)** → report them, apply nothing automatically.
+
+---
+
 ## Edge cases and failure handling
 
 - **Uncommitted changes on main** → abort with a clear message. Don't stash.
@@ -229,4 +356,5 @@ Do **not** update the Retell LLM in this mode. The redeploy happens after the MR
 - Creating new clients or new prompt files from scratch — use `voice-ai-prototype` for that.
 - First-time creation of an agent (prompt + Retell deploy) — use `voice-ai-prototype` for that.
 - Managing branch/MR lifecycle post-merge — the user handles that in the GitLab UI.
-- Reviewing or merging MRs.
+- Human-side MR review (judging whether to approve/merge). Review mode *applies* the user's already-written review comments as edits; it doesn't decide whether the prompt is good.
+- Merging MRs — the user clicks merge in GitLab when satisfied.
