@@ -1,6 +1,6 @@
 ---
 name: voice-ai-improve-prompt
-description: Iterate on a voice AI agent prompt in the novanest-ai/ai_prompts GitLab repo. **Direct mode** (default): commit straight to main and redeploy the Retell LLM. **`--with-pr` mode**: commit to a per-prompt branch and open or extend a merge request. **Review mode**: when the user points at an open MR and asks to apply its unresolved inline comments, the skill fetches each comment, applies the edit, commits, pushes, replies "done", and resolves the discussion. Use this skill whenever the user wants to improve, iterate on, edit, or revise a voice AI prompt — phrasings like "update the prompt for <client>", "improve John Giordani's prompt", "push prompt changes", "iterate on the voice agent prompt", "apply the unresolved comments on MR !42", "pull feedback from <MR url>", "review mode on <MR>", or any request that implies editing a prompt under CLIENTS/DEMOS/PROSPECTS/INTERNAL. Only take the `--with-pr` path when the user explicitly asks for a PR, MR, or merge request; review mode triggers when the user references an MR and asks for its comments to be applied. Otherwise default to direct mode. Prefer this skill over plain git/glab commands for any voice-AI-prompt iteration.
+description: Iterate on a voice AI agent prompt in the novanest-ai/ai_prompts GitLab repo. This skill only touches files (prompt and KB) and git — it does NOT push changes into Retell. **Direct mode** (default): commit straight to main and push; the caller then invokes `voice-ai-deploy-retell` to sync Retell. **`--with-pr` mode**: commit to a per-prompt branch and open or extend a merge request; Retell is synced by a GitLab CI job after merge, no local deploy needed. **Review mode**: when the user points at an open MR and asks to apply its unresolved inline comments, the skill fetches each comment, applies the edit, commits, pushes, replies "done", and resolves the discussion — still no Retell changes. Use this skill whenever the user wants to improve, iterate on, edit, or revise a voice AI prompt — phrasings like "update the prompt for <client>", "improve John Giordani's prompt", "push prompt changes", "iterate on the voice agent prompt", "apply the unresolved comments on MR !42", "pull feedback from <MR url>", "review mode on <MR>", or any request that implies editing a prompt under CLIENTS/DEMOS/PROSPECTS/INTERNAL. Only take the `--with-pr` path when the user explicitly asks for a PR, MR, or merge request; review mode triggers when the user references an MR and asks for its comments to be applied. Otherwise default to direct mode. Prefer this skill over plain git/glab commands for any voice-AI-prompt iteration.
 ---
 
 # Voice AI — Improve Prompt
@@ -9,30 +9,31 @@ description: Iterate on a voice AI agent prompt in the novanest-ai/ai_prompts Gi
 
 Takes a user instruction describing how to improve a voice AI prompt, and in a single pass:
 
-1. Resolves the target prompt file inside `C:\Users\benelk\Documents\ai_prompts`.
+1. Resolves the target prompt file inside the `ai_prompts` repo.
 2. Applies the requested improvement (and, if relevant, splits knowledge-base content into sibling `kb-*.txt` files — see Step B2).
-3. Ships the change via one of three modes:
-   - **Default (direct mode)**: commit to `main`, push, then redeploy the Retell LLM so the live agent picks up the change immediately.
-   - **`--with-pr` mode**: commit to a per-prompt branch, push, and open (or extend) a merge request against `main`. No Retell redeploy — that happens after the MR is merged, out of band.
-   - **Review mode**: the instructions come from an MR's unresolved inline comments instead of from chat. The skill fetches the comments, applies them, commits + pushes to the MR branch, and replies + resolves each comment.
+3. Ships the change via one of three modes, **all of which are files-only**. Retell updates happen outside this skill — either by the caller invoking `voice-ai-deploy-retell` after direct mode returns, or automatically via GitLab CI after a `--with-pr` MR merges.
+   - **Default (direct mode)**: commit to `main`, push, done. Caller is expected to chain into `voice-ai-deploy-retell` next.
+   - **`--with-pr` mode**: commit to a per-prompt branch, push, and open (or extend) a merge request against `main`. Retell sync happens automatically on merge via GitLab CI — no manual deploy step needed.
+   - **Review mode**: the instructions come from an MR's unresolved inline comments instead of from chat. The skill fetches the comments, applies them, commits + pushes to the MR branch, and replies + resolves each comment. Retell sync still happens on merge via CI.
 
 The design assumption for direct and `--with-pr` modes is that the user provides **everything at once** — client/category, which prompt file, and what to change. For review mode, the user just provides the MR reference and the comments carry the instructions. If anything is ambiguous, clarify before touching the repo.
 
 ## Choosing the mode
 
-- **Default to direct mode.** If the user just says "improve the prompt for X" / "update John Giordani's prompt" / "add a rebuttal to the pricing section", ship straight to `main` and redeploy Retell.
+- **Default to direct mode.** If the user just says "improve the prompt for X" / "update John Giordani's prompt" / "add a rebuttal to the pricing section", ship straight to `main`. The caller's orchestration (voice-ai-head CLAUDE.md) will invoke `voice-ai-deploy-retell` after this skill returns.
 - **Use `--with-pr` when the user explicitly asks for it** — phrases like "with a PR", "open a merge request", "don't push to main", "review first", "--with-pr". If there's any doubt, default to direct mode; the user knows to ask for a PR when they want one.
 - **Use review mode when the user points at an open MR and asks to apply its comments** — phrases like "apply the unresolved comments on MR !42", "pull feedback from <MR url>", "review mode on <MR>", "apply the comments". Trigger is unambiguous — there's an MR reference and an ask to consume its comments as instructions. Skip if the user is just asking about the MR without asking to act on comments.
 
 ## Repo facts (do not re-derive)
 
-- Local clone: `C:\Users\benelk\Documents\ai_prompts`
+- Local clone (Mac): `/Users/benjaminelkrieff/Documents/Claude Code Master Folder/ai_prompts`
 - Remote: `git@gitlab.com:novanest-ai/ai_prompts.git` (project path: `novanest-ai/ai_prompts`)
 - Base branch: `main`
 - Top-level categories (all UPPERCASE, with spaces): `CLIENTS`, `PROSPECTS`, `DEMOS`, `INTERNAL`, `ARCHIVE`
 - Client subdirs are UPPERCASE with spaces (e.g., `JOHN GIORDANI`, `A1 BIOHAZARD`)
 - Prompt filenames are inconsistent — a given client folder may contain `prompt.md`, `prompt improved.md`, `original_instructions.md`, `.txt` variants, etc.
 - Auth: `glab` CLI is already logged in as `benjamin282`. Git uses SSH.
+- GitLab CI auto-deploys Retell on every merge to `main`. `.gitlab-ci.yml` in the repo diffs changed prompt/KB files and POSTs a mission task per affected prompt to the Claude Claw dashboard API, which invokes `voice-ai-deploy-retell` on the voice-ai-head agent. So anything merged to `main` via `--with-pr` is on its way to Retell without further action.
 
 ## Inputs you need from the user
 
@@ -52,7 +53,7 @@ Clarifying once up-front is fine. Don't ask twice.
 
 ## Resolution: find the target file
 
-1. `cd` into `C:\Users\benelk\Documents\ai_prompts`.
+1. `cd` into `/Users/benjaminelkrieff/Documents/Claude Code Master Folder/ai_prompts`.
 2. List the category dir (e.g., `ls CLIENTS`) and match the client name case-insensitively. If the user said "john giordani", that maps to `CLIENTS/JOHN GIORDANI/`.
 3. List that subdir. If multiple prompt files exist and the user didn't pick one, ask.
 4. Target path is then e.g. `CLIENTS/JOHN GIORDANI/prompt.md`. Keep the original casing and spaces — the file path goes to git as-is.
@@ -111,9 +112,11 @@ Otherwise, for each reference chunk identified in Step B0:
 
 **Add or update the `## Knowledge Base` pointer section** near the bottom of the prompt (above Notes) so each KB file is listed with what's in it and when to consult it. Format per [../../voice-ai-shared/references/knowledge-base-split.md](../../voice-ai-shared/references/knowledge-base-split.md). One line per KB — navigation only.
 
-## Direct mode (default): push to main + redeploy Retell
+## Direct mode (default): push to main
 
-Order of operations: Step A → Step B0 → Step B → Step B2 → Step C → Step D → Step E.
+Order of operations: Step A → Step B0 → Step B → Step B2 → Step C → Step E.
+
+Retell is NOT updated by this skill. The caller (voice-ai-head CLAUDE.md orchestration) is expected to invoke `voice-ai-deploy-retell` after this skill returns, pointing it at the edited prompt file. That's the seam between file work and deploy work — keep them separate.
 
 ### Step C — Commit and push to main
 
@@ -129,26 +132,15 @@ If the push is rejected non-fast-forward, `git pull --rebase origin main` and tr
 
 Commit message style: imperative, ≤72 char subject.
 
-### Step D — Redeploy the Retell LLM
-
-The live agent pulls its system prompt from the Retell LLM object. Without this step, the main branch is updated but the agent still speaks the old prompt.
-
-1. Identify the Retell LLM for this client. The normal source of truth is the client's folder in `C:\Users\benelk\Documents\AI-OS\AI-Agency\Clients\[ClientName]\` — look for a recorded `llm_id` / `agent_id` (commonly in a `retell.json`, `deployment.md`, or similar file). If nothing is recorded, fall back to `list_retell_llms` / `list_agents` via the RetellAI MCP and match by name.
-2. Read the updated prompt file (and any `kb-*.txt` files that feed into the LLM, if the deployment uses them).
-3. Call `update_retell_llm` with the new `general_prompt`. If knowledge bases are attached, update those as well per the RetellAI docs (use Context7 `resolve-library-id` / `query-docs` for "retell ai update knowledge base" if unsure of current API shape).
-4. Do NOT create a new LLM or a new agent. This is an in-place update only.
-
-If the Retell update fails, surface the error clearly. The git push already landed on main, so the prompt file is updated regardless — the user needs to know the agent didn't redeploy.
-
 ### Step E — Report back (direct mode)
 
 ```
 Edited:   CLIENTS/JOHN GIORDANI/prompt.md
 Pushed:   main (commit <short-sha>)
-Retell:   LLM <llm_id> redeployed
-```
 
-If the Retell redeploy failed, say so explicitly and include the error.
+Next step (not run by this skill):
+  voice-ai-deploy-retell on the edited file to sync Retell.
+```
 
 ## `--with-pr` mode: branch + merge request
 
@@ -208,11 +200,14 @@ glab mr create \
 Edited: CLIENTS/JOHN GIORDANI/prompt.md
 Branch: john-giordani-prompt (pushed)
 MR:     https://gitlab.com/novanest-ai/ai_prompts/-/merge_requests/123
+
+Retell: not synced from this skill. GitLab CI will auto-deploy
+        via voice-ai-deploy-retell when the MR merges to main.
 ```
 
 If the MR already existed, say "MR already open" instead of creating a new one.
 
-Do **not** update the Retell LLM in this mode. The redeploy happens after the MR is merged, out of band.
+Do **not** update the Retell LLM in this mode. The redeploy happens automatically via the `.gitlab-ci.yml` `deploy-retell` job after the MR is merged — the job POSTs a mission task to Claude Claw's dashboard API which invokes `voice-ai-deploy-retell` on the voice-ai-head agent. If CI fails, Ben will see it in GitLab and can manually run `voice-ai-deploy-retell` to recover.
 
 ## Review mode: apply unresolved MR comments
 
@@ -348,13 +343,13 @@ If there were general (non-inline) MR comments, list them here so the user can a
 - **`glab mr create` fails because one already exists** → treat as success, fetch and print the existing MR URL.
 - **Client folder not found** → list the closest matches from the category dir and ask.
 - **Prompt file not found** → list what's in the client folder and ask which to edit.
-- **Retell LLM not found in client folder's deployment metadata** → fall back to `list_retell_llms` / `list_agents` and match by name. If still ambiguous, ask the user which LLM ID to update rather than guessing.
 - **User asks for changes across multiple prompts at once** → handle one at a time. Do the first, report, then ask before continuing.
 
 ## What this skill is *not* for
 
 - Creating new clients or new prompt files from scratch — use `voice-ai-prototype` for that.
-- First-time creation of an agent (prompt + Retell deploy) — use `voice-ai-prototype` for that.
+- First-time creation of an agent (prompt + Retell deploy) — use `voice-ai-prototype` then `voice-ai-deploy-retell`.
+- Any Retell-side change (LLM update, KB sync, voice swap, agent params) — use `voice-ai-deploy-retell`. This skill never calls the Retell API.
 - Managing branch/MR lifecycle post-merge — the user handles that in the GitLab UI.
 - Human-side MR review (judging whether to approve/merge). Review mode *applies* the user's already-written review comments as edits; it doesn't decide whether the prompt is good.
 - Merging MRs — the user clicks merge in GitLab when satisfied.

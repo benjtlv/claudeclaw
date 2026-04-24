@@ -1,17 +1,19 @@
 ---
 name: voice-ai-prototype
-description: Build a voice AI agent end-to-end for a potential or existing client — generates the prompt file(s), creates the Retell LLM + agent + knowledge bases, and provisions a phone number. Default mode produces one receptionist prompt + one deployed Retell agent bound to a phone number. `--trojan-horse` mode additionally produces a sales-oriented Trojan variant (subtly drives callers to book a sales call with Ben); in that case two agents are deployed but the phone number is bound to the Trojan agent only. Use this skill when Ben provides a client description, call transcript, website, or any business context and says things like "build a prompt for [client]", "create an agent for [business]", "prototype for [client]", "voice agent for [company]", "build a Trojan horse demo for [client]". This skill is for first-time creation only — if the agent already exists in Retell, it refuses and routes to `voice-ai-improve-prompt`.
+description: Drafts the prompt and knowledge-base files for a new voice AI agent — produces the prompt file(s), any `kb-*.txt` sibling files, saves them into the right client folder in the `ai_prompts` repo, and commits to main. Default mode drafts one receptionist prompt. `--trojan-horse` mode additionally drafts a sales-oriented Trojan variant (subtly drives callers to book a sales call with Ben). This skill does NOT touch Retell — it only produces files. The caller should invoke `voice-ai-deploy-retell` immediately after to create the actual Retell LLM + agent + phone number from the committed files. Use this skill when Ben provides a client description, call transcript, website, or any business context and says things like "build a prompt for [client]", "create an agent for [business]", "prototype for [client]", "voice agent for [company]", "build a Trojan horse demo for [client]". This skill is for first-time creation only — if a prompt file already exists for the client, route to `voice-ai-improve-prompt`.
 ---
 
 # Voice AI Prototype Prompt Skill
 
-Builds a deployment-ready voice AI agent end-to-end: prompt generation, Retell LLM creation, knowledge base attachment, agent creation, phone number provisioning, sidecar metadata, and git commit. One skill, one pass, agent is live when done.
+Drafts the prompt file(s) and any supporting `kb-*.txt` knowledge-base files for a new voice AI agent, and commits them to the `ai_prompts` repo. Scope is **files only**. Retell deployment (LLM creation, KB upload, agent creation, phone provisioning, sidecar write) is handled by `voice-ai-deploy-retell`, which the caller should invoke immediately after this skill returns.
+
+Splitting this way keeps each skill single-purpose: prompt craft lives here, Retell mechanics live in the deploy skill. It also means a prompt change that's meant to ship via MR can go through the PR-based flow (`voice-ai-improve-prompt --with-pr`) and only hit Retell after human review + merge — which is why the file and deploy concerns are deliberately separate.
 
 ## The two modes
 
-**Regular mode (default).** One receptionist prompt → one Retell agent → one phone number. The agent acts as the business's AI receptionist. Use this for existing clients, or for prospects Ben already has on a sales call where the demo just needs to sound impressive.
+**Regular mode (default).** One receptionist prompt. Use this for existing clients, or for prospects Ben already has on a sales call where the demo just needs to sound impressive.
 
-**Trojan horse mode (`--trojan-horse`).** For cold leads who expressed interest but didn't book a call. Produces the same receptionist prompt as regular mode **plus** a second Trojan variant that rides the receptionist persona and subtly segues into a sales pitch targeting a booked call with Ben. Two Retell agents get created. The provisioned phone number is bound to the **Trojan agent only** — the regular agent sits ready in Retell, phone-less, waiting to go live on the client's real line once Ben closes the sale.
+**Trojan horse mode (`--trojan-horse`).** For cold leads who expressed interest but didn't book a call. Produces the same receptionist prompt as regular mode **plus** a second Trojan variant that rides the receptionist persona and subtly segues into a sales pitch targeting a booked call with Ben. Both files get committed. The deploy skill will later create two Retell agents and bind the phone number to the Trojan one; that's the deploy skill's business, not this skill's.
 
 Ben invokes the mode explicitly (flag in the request, or he says "build me a Trojan horse for X"). If unclear, default to regular and flag it.
 
@@ -185,13 +187,13 @@ Otherwise, for each reference group identified in Step 1.5:
 
 **Add the `## Knowledge Base` pointer section** near the bottom of the prompt (above "Notes"), listing each KB file with what's in it and when to consult it. Format per [knowledge-base-split.md](../../voice-ai-shared/references/knowledge-base-split.md). One line per KB — this is navigation only, not content.
 
-In Trojan mode, both prompts share the same `kb-*.txt` files. Both Retell agents will get the same KBs attached. Do not duplicate the files.
+In Trojan mode, both prompts share the same `kb-*.txt` files. Both Retell agents (created later by `voice-ai-deploy-retell`) will get the same KBs attached. Do not duplicate the files.
 
 ---
 
 ## Step 4: Save the prompt file(s)
 
-**Prompts root:** `C:\Users\benelk\Documents\ai_prompts`
+**Prompts root (Mac):** `/Users/benjaminelkrieff/Documents/Claude Code Master Folder/ai_prompts`.
 
 ### 4.1 Destination folder
 
@@ -216,214 +218,18 @@ The filename asymmetry is intentional — the shorter `-prompt-trojan.md` is Ben
 
 Always confirm before writing. Never save without Ben's explicit go-ahead on folder + filenames.
 
-Do NOT push to git yet — the sidecar metadata from the Retell creation step needs to go in the same commit. Commit-and-push happens in Step 12.
+### 4.4 Handoff name for the deploy skill
+
+The caller (`voice-ai-head` CLAUDE.md orchestration) will invoke `voice-ai-deploy-retell` with the prompt file path(s) you just saved. The deploy skill derives the Retell agent name itself from the filename, so you don't need to pass an explicit agent name. Just return the absolute path(s) of the prompt file(s) you committed. The deploy skill handles collision-checking against Retell's existing agents.
 
 ---
 
-## Step 5: Derive Retell agent name(s) and check for collisions
+## Step 5: Git commit and push
 
-The `ai_prompts` repo is local at `C:\Users\benelk\Documents\ai_prompts` and pushes to `git@gitlab.com:novanest-ai/ai_prompts.git` on `main`.
-
-### 5.1 Derive agent names from the filenames
-
-Rules:
-1. Strip extension (`.md` or `.txt`).
-2. If the base ends with `-prompt`, strip that suffix.
-3. If the base ends with `-voice-agent-prompt`, strip that suffix.
-4. If the base ends with `-trojan` (after the above stripping), keep it — it's the Trojan marker.
-5. Replace every `-` and `_` with a space.
-6. Uppercase the whole string.
-7. Collapse any runs of whitespace to a single space; trim.
-
-Examples:
-- `john-giordani-voice-agent-prompt.md` → `JOHN GIORDANI`
-- `john-giordani-prompt-trojan.md` → `JOHN GIORDANI TROJAN`
-- `claim-warriors-inbound-prompt.md` → `CLAIM WARRIORS INBOUND`
-
-For a cleaner deployed look, append ` VOICE AGENT` to the regular-mode name only — the Trojan name already has `TROJAN` suffix which signals the variant. So the final derivation is:
-- Regular: `JOHN GIORDANI VOICE AGENT`
-- Trojan: `JOHN GIORDANI TROJAN`
-
-If the derived regular name would be just `PROMPT` or `PROMPT IMPROVED` (i.e. filename was too generic), stop and ask Ben for an explicit name.
-
-### 5.2 Collision check
-
-Call `list_agents` via the NovaNest RetellAI MCP. Case-insensitive compare against `agent_name`.
-
-Also check whether a sidecar file already exists in the target folder (see Step 11 for sidecar filenames). If the sidecar exists AND the agent is live in Retell → refuse: "An agent named `<AGENT NAME>` already exists in Retell (agent_id `<id>`). This skill only handles first-time creation — use `voice-ai-improve-prompt` to modify."
-
-In Trojan mode, check both derived names. If either collides, refuse with specifics.
-
----
-
-## Step 6: Fixed Retell settings
-
-- **Model:** `gpt-4.1`
-- **Voice:** Jennifer Suarez — look up `voice_id` at runtime via `list_voices` (name is the anchor, not a hardcoded ID)
-- **Default area code:** `954` (South Florida). If Ben gave one, use his.
-- **Env:** `RETELL_API_KEY` in `C:\Users\benelk\Documents\claudeclaw\.env`
-
-## Tooling: MCP first, REST fallback via context7
-
-Prefer the NovaNest RetellAI MCP tools for every call where an equivalent exists: `list_agents`, `create_retell_llm`, `create_agent`, `create_phone_number`, `list_voices`, `update_retell_llm`.
-
-If an operation isn't exposed by the MCP (knowledge-base creation, attaching KBs to LLMs, uploading KB source files are the usual gaps), fall back to the Retell REST API:
-
-1. Use `context7` MCP to fetch current docs. `resolve-library-id` with query `retell ai`, then `query-docs` with your specific question. Don't trust cached knowledge — the API shape evolves.
-2. Load `RETELL_API_KEY` from `.env`.
-3. Call via `curl` or an inline Python script.
-4. Never hardcode the API key.
-
----
-
-## Step 7: Create Retell LLM(s)
-
-**Regular mode — one LLM:**
-
-Call `create_retell_llm` via MCP with:
-- `model`: `gpt-4.1`
-- `general_prompt`: full contents of the regular prompt file
-- `model_temperature`: Retell default unless Ben specified
-
-Capture `llm_id_regular`.
-
-**Trojan mode — two LLMs:**
-
-Create both — regular first, then Trojan. Same payload shape, `general_prompt` differs:
-- `llm_id_regular` ← regular prompt file contents
-- `llm_id_trojan` ← Trojan prompt file contents
-
-Consider bumping `model_temperature` slightly for the Trojan LLM to make the sales segue feel less scripted (e.g., default + 0.1). Flag the choice in the final summary.
-
----
-
-## Step 8: Create knowledge bases and attach
-
-If `kb-*.txt` files exist in the folder, for each file:
-
-1. Derive KB name: `<REGULAR AGENT NAME> — <topic>` where `<topic>` is the filename segment between `kb-` and `.txt`, title-cased. Example: `kb-faqs.txt` → `JOHN GIORDANI VOICE AGENT — Faqs`.
-2. Create the knowledge base and upload the `.txt` as source. If the MCP exposes `create_knowledge_base`, use it; otherwise context7 + REST.
-3. Capture `knowledge_base_id`.
-
-After all KBs exist, attach them to **both** LLMs in Trojan mode, or just the one LLM in Regular mode. KB naming stays anchored to the regular agent name — the Trojan agent shares the same KBs, no duplication.
-
-If KB creation fails mid-way, report what was created and what failed, then stop. Don't leave partially-wired agents.
-
----
-
-## Step 9: Create Retell agent(s)
-
-### 9.1 Get Jennifer Suarez voice_id
-
-Call `list_voices`, match "Jennifer Suarez" case-insensitively. If missing, stop and ask Ben which voice.
-
-### 9.2 Create agents
-
-**Regular mode — one agent:**
-
-`create_agent` with:
-- `agent_name`: regular derived name (e.g., `JOHN GIORDANI VOICE AGENT`)
-- `response_engine`: `{ type: "retell-llm", llm_id: <llm_id_regular> }`
-- `voice_id`: Jennifer Suarez
-- Other fields: Retell defaults unless the prompt file has a Voice Settings section
-
-Capture `agent_id_regular`.
-
-**Trojan mode — two agents:**
-
-Create regular agent (same payload as above) → capture `agent_id_regular`.
-Create Trojan agent with `agent_name` = Trojan derived name, `llm_id` = `llm_id_trojan`, same voice → capture `agent_id_trojan`.
-
----
-
-## Step 10: Provision phone number
-
-**Regular mode:**
-`create_phone_number` via MCP with `area_code` (Ben's or `954` default), `inbound_agent_id: <agent_id_regular>`. Capture `phone_number`.
-
-**Trojan mode:**
-`create_phone_number` with `inbound_agent_id: <agent_id_trojan>` — the phone routes to the **Trojan** agent only. The regular agent sits phone-less in Retell, ready for post-sale phone assignment. Capture `phone_number`.
-
-If no number is available in the requested area code, surface Retell's error verbatim and ask Ben for a fallback area code. Don't silently pick a different one.
-
----
-
-## Step 11: Write sidecar(s)
-
-Sidecar filename = prompt basename (minus extension) + `.retell.json`, same directory as the prompt file.
-
-**Regular mode — one sidecar** next to the regular prompt:
-
-```json
-{
-  "agent_name": "JOHN GIORDANI VOICE AGENT",
-  "agent_id": "agent_abc...",
-  "llm_id": "llm_xyz...",
-  "model": "gpt-4.1",
-  "voice": { "name": "Jennifer Suarez", "voice_id": "..." },
-  "phone_number": "+19545550123",
-  "area_code": "954",
-  "knowledge_bases": [
-    {"name": "JOHN GIORDANI VOICE AGENT — Faqs", "id": "kb_...", "source_file": "kb-faqs.txt"}
-  ],
-  "prompt_file": "CLIENTS/JOHN GIORDANI/john-giordani-voice-agent-prompt.md",
-  "mode": "regular",
-  "created_at": "<ISO-8601 UTC>",
-  "last_synced_at": "<same on first run>"
-}
-```
-
-**Trojan mode — two sidecars.**
-
-Regular sidecar (`[client]-voice-agent-prompt.retell.json`):
-```json
-{
-  "agent_name": "JOHN GIORDANI VOICE AGENT",
-  "agent_id": "agent_reg...",
-  "llm_id": "llm_reg...",
-  "model": "gpt-4.1",
-  "voice": { "name": "Jennifer Suarez", "voice_id": "..." },
-  "phone_number": null,
-  "phone_status": "awaiting post-sale assignment",
-  "area_code": null,
-  "knowledge_bases": [ ... same IDs as Trojan sidecar ... ],
-  "prompt_file": "PROSPECTS/JOHN GIORDANI/john-giordani-voice-agent-prompt.md",
-  "mode": "regular",
-  "sibling_trojan_agent_id": "agent_troj...",
-  "created_at": "...",
-  "last_synced_at": "..."
-}
-```
-
-Trojan sidecar (`[client]-prompt-trojan.retell.json`):
-```json
-{
-  "agent_name": "JOHN GIORDANI TROJAN",
-  "agent_id": "agent_troj...",
-  "llm_id": "llm_troj...",
-  "model": "gpt-4.1",
-  "voice": { "name": "Jennifer Suarez", "voice_id": "..." },
-  "phone_number": "+19545550123",
-  "area_code": "954",
-  "knowledge_bases": [ ... same IDs ... ],
-  "prompt_file": "PROSPECTS/JOHN GIORDANI/john-giordani-prompt-trojan.md",
-  "mode": "trojan",
-  "sibling_regular_agent_id": "agent_reg...",
-  "created_at": "...",
-  "last_synced_at": "..."
-}
-```
-
-Omit `knowledge_bases` entirely if there are none (don't emit an empty array).
-
----
-
-## Step 12: Git commit and push
-
-One commit bundles prompts + sidecars + any `kb-*.txt` files. This is the only push in the whole flow.
+One commit bundles the prompt(s) + any `kb-*.txt` files. This is the only push in this skill — sidecars are the deploy skill's responsibility.
 
 ```bash
-cd /c/Users/benelk/Documents/ai_prompts
+cd "/Users/benjaminelkrieff/Documents/Claude Code Master Folder/ai_prompts"
 git checkout main
 git pull --ff-only origin main
 ```
@@ -433,10 +239,10 @@ If local has uncommitted unrelated changes, flag them and stop before committing
 Stage the specific files only:
 
 ```bash
-git add "<regular prompt path>" "<regular sidecar path>" \
-  [ "<trojan prompt path>" "<trojan sidecar path>" ] \
+git add "<regular prompt path>" \
+  [ "<trojan prompt path>" ] \
   [ "<each kb-*.txt path>" ]
-git commit -m "Add voice agent for <AGENT NAME>[ + Trojan]"
+git commit -m "prompt(<agent-slug>): draft voice agent prompt[ + Trojan]"
 git push origin main
 ```
 
@@ -446,59 +252,42 @@ On success, confirm `Pushed to main: <short SHA>`.
 
 ---
 
-## Step 13: Report back
+## Step 6: Report back and hand off
 
-Clean summary. Always lead with what was deployed.
+Clean summary. Focus on what was produced, not what will happen next — the orchestration layer (voice-ai-head CLAUDE.md) decides whether to chain into the deploy skill.
 
 **Regular mode:**
 ```
-Created in Retell:
-  Agent:          JOHN GIORDANI VOICE AGENT
-  agent_id:       agent_abc123...
-  llm_id:         llm_xyz789...
-  Voice:          Jennifer Suarez
-  Phone:          +1 (954) 555-0123   (area code: 954 — default)
-  Knowledge bases:
-    - JOHN GIORDANI VOICE AGENT — Faqs   (kb_...)
+Drafted prompt:
+  File:        CLIENTS|PROSPECTS/<FOLDER>/<client>-voice-agent-prompt.md
+  KBs:         kb-faqs.txt, kb-pricing.txt  (or: none)
+  Committed:   main, <short SHA>
 
-Saved to: PROSPECTS/JOHN GIORDANI/ (pushed to main, <short SHA>)
+Next step (not run by this skill):
+  voice-ai-deploy-retell on the file above to create the Retell LLM, KBs, agent, and phone.
 ```
 
 **Trojan mode:**
 ```
-Created in Retell (Trojan horse demo):
-  Regular agent:  JOHN GIORDANI VOICE AGENT
-    agent_id:     agent_reg...
-    llm_id:       llm_reg...
-    phone:        (none — awaiting post-sale assignment)
+Drafted prompts:
+  Regular:     PROSPECTS/<FOLDER>/<client>-voice-agent-prompt.md
+  Trojan:      PROSPECTS/<FOLDER>/<client>-prompt-trojan.md
+  KBs (shared):kb-faqs.txt  (or: none)
+  Committed:   main, <short SHA>
 
-  Trojan agent:   JOHN GIORDANI TROJAN
-    agent_id:     agent_troj...
-    llm_id:       llm_troj...
-    phone:        +1 (954) 555-0123   (bound to Trojan) (area: 954 — default)
-
-  Voice:          Jennifer Suarez (both agents)
-  Knowledge bases (shared):
-    - JOHN GIORDANI VOICE AGENT — Faqs   (kb_...)
-
-Saved to: PROSPECTS/JOHN GIORDANI/ (pushed to main, <short SHA>)
-
-Demo number to send the lead: +1 (954) 555-0123
+Next step (not run by this skill):
+  voice-ai-deploy-retell on both files. Trojan agent will hold the phone number;
+  the regular agent sits phone-less awaiting post-sale assignment.
 ```
 
-If the area code was defaulted, note it so Ben can override. If any assumptions were made during prompt generation, flag them after the summary: "Assumed X because Y — confirm and I'll update."
+If any assumptions were made during prompt generation, flag them after the summary: "Assumed X because Y — confirm and I'll update."
 
 ---
 
 ## Edge cases and failure handling
 
-- **Prompt file would overwrite something** → confirm with Ben before overwriting; never silently clobber.
-- **Agent name collision in Retell** → refuse with the name and `agent_id` of the existing agent. Don't append `(2)`.
-- **Derived name too generic** (`PROMPT`, `PROMPT IMPROVED`) → stop and ask for an explicit agent name.
-- **`.env` missing or `RETELL_API_KEY` not set** → stop before any Retell call.
-- **KB creation partial failure** → report what succeeded, what failed, surface Retell's error body, stop.
-- **No phone number available in area code** → surface the error, ask for alternate area code. Don't silently fall back.
-- **Jennifer Suarez not in `list_voices`** → ask Ben which voice.
+- **Prompt file would overwrite something** → stop and tell the caller. This skill is first-time creation only. Route to `voice-ai-improve-prompt`.
+- **Agent already exists in Retell with the derived name** → this skill doesn't check — the deploy skill will. No action needed here.
 - **Push rejected non-fast-forward** → `git pull --rebase`, retry once. If conflicts, stop.
 - **Working tree dirty with unrelated changes** → flag them, do not bundle. Ben should clean up first, then re-run.
 - **Ambiguous mode signal** ("build a demo for X") → default to Regular, flag in summary.
@@ -508,9 +297,11 @@ If the area code was defaulted, note it so Ben can override. If any assumptions 
 
 ## What this skill is NOT for
 
-- Updating an existing Retell agent's prompt, KBs, or voice — that's `voice-ai-improve-prompt`.
+- Creating Retell LLMs, KBs, agents, or phone numbers — that's `voice-ai-deploy-retell`.
+- Writing the sidecar `.retell.json` file — that's `voice-ai-deploy-retell`.
+- Updating an existing prompt file — that's `voice-ai-improve-prompt`.
 - Iterating on an existing prompt file — `voice-ai-improve-prompt`.
-- Deleting agents, LLMs, KBs, or phone numbers.
+- Deleting anything in Retell or in the repo.
 - Testing or making calls.
 - Managing GitLab MRs — `voice-ai-improve-prompt --with-pr`.
 

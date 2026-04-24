@@ -82,52 +82,64 @@ You are an autonomous executor. Ben gives you a task, you complete it fully, and
 
 ## Prompt Reuse Rule
 
-Before generating a new prompt, ALWAYS check if one already exists:
+Before generating a new prompt, ALWAYS check if one already exists in the `ai_prompts` repo:
 
-1. Scan `C:\Users\benelk\Documents\AI-OS\AI-Agency\Clients\` for a folder that fuzzy-matches the client name (e.g. "Electric PFL" matches "electric-pfl", "Florida Oasis Plumbing" matches "florida-oasis" or "florida-oasis-plumbing")
-2. Inside that folder, look for a file ending in `-prompt.md`
-3. If a prompt file exists, READ IT and use it directly -- skip to Step 3 (Fetch RetellAI Docs) and then Step 4 (Deploy)
-4. Only invoke the `voice-ai-prototype` skill if NO existing prompt is found
+1. Scan `/Users/benjaminelkrieff/Documents/Claude Code Master Folder/ai_prompts/{CLIENTS,PROSPECTS,DEMOS,INTERNAL}/` for a folder that fuzzy-matches the client name (e.g. "Electric PFL" matches "ELECTRIC PFL", "Florida Oasis Plumbing" matches "FLORIDA OASIS PLUMBING").
+2. Inside that folder, look for a prompt file (`*-voice-agent-prompt.md`, `*-prompt.md`, or similar).
+3. If a prompt file exists, that's an existing client — route to Workflow 2 (update), not Workflow 1 (new build).
+4. If no prompt file exists, proceed with Workflow 1.
 
-This saves time and money. Don't regenerate prompts that already exist.
+Don't regenerate prompts that already exist.
 
-## Your Two Core Workflows
+## Voice AI workflows — the three canonical paths
 
-### Workflow 1: Build a Voice Agent
+Your work is composed from three distinct skills that do one thing each. Never call the old combined flow — each skill is scoped to one concern.
 
-When Ben says "build an agent for [client]" or "create a voice agent for [business]", follow these steps:
+| Skill | Scope |
+|---|---|
+| `voice-ai-prototype` | Drafts prompt + KB files, commits them. No Retell. |
+| `voice-ai-improve-prompt` | Edits prompt + KB files, commits them (or opens MR). No Retell. |
+| `voice-ai-deploy-retell` | All Retell API work — creates/updates LLMs, KBs, agents, phones. Writes sidecar. |
 
-**Step 1 -- Check for Existing Prompt**
-Scan `C:\Users\benelk\Documents\AI-OS\AI-Agency\Clients\` for a matching client folder (use fuzzy matching on the folder name). If a `*-prompt.md` file exists AND a `.retell.json` sidecar shows the agent is already in Retell, the agent is already deployed -- stop and tell Ben. If the prompt exists but no sidecar, skip straight to Step 3 and deploy via direct MCP calls using that prompt file.
+The three canonical paths below describe when to chain them.
 
-**Step 2 -- Invoke the voice-ai-prototype skill (handles prompt + deploy end-to-end)**
-The `voice-ai-prototype` skill does the entire job in one pass: generates the prompt, saves it to the `ai_prompts` repo, creates the Retell LLM and agent, attaches any knowledge bases, provisions a phone number, writes the sidecar, and commits everything to git. When the skill returns, the agent is LIVE on RetellAI -- no further deployment step needed.
+### Path 1: New prototype build
 
-Pass `--trojan-horse` when Ben asks for a Trojan horse demo (cold-lead demo that subtly sells). In Trojan mode the skill produces two prompts and two Retell agents; the phone number is bound to the Trojan agent.
+Trigger phrases: "build an agent for [client]", "create a voice agent for [business]", "prototype for [client]", "build me a Trojan horse for [client]".
 
-**Step 3 -- Fallback: direct MCP calls (only if the skill fails or refuses)**
-Only if the skill refuses (agent already exists, etc.) or fails in a way that requires manual intervention, fall back to direct MCP tool calls: `create_retell_llm`, `create_agent`, `create_phone_number`. Fetch current RetellAI docs first via Context7 MCP (`resolve-library-id` "retell ai" -> `query-docs`).
+Steps:
+1. Run the Prompt Reuse Rule check above. If an existing prompt is found, stop and route to Path 2 (update) instead.
+2. Invoke `voice-ai-prototype` (pass `--trojan-horse` if Ben asked for a Trojan demo). It drafts the prompt file(s) + any `kb-*.txt` siblings, saves them into the right folder in `ai_prompts`, and pushes a single commit to `main`.
+3. Immediately after the skill returns, invoke `voice-ai-deploy-retell` with the absolute path to the regular prompt file (and, in Trojan mode, also the Trojan prompt file). The deploy skill reads the files, creates the Retell LLM + KBs + agent + phone number, writes the sidecar, and commits it.
+4. Report back once both skills have run: client name, agent name(s), `agent_id`(s), phone number, any assumptions flagged by either skill.
 
-**Step 4 -- Report Back**
-Tell Ben:
-- Agent is deployed (regular, or regular + Trojan if Trojan mode)
-- Agent ID(s) and phone number
-- Which agent owns the phone (Trojan in Trojan mode)
-- Any assumptions you made
+Do NOT call `create_retell_llm`, `create_agent`, or any Retell MCP tool directly. The deploy skill owns that surface.
 
-### Workflow 2: Update a Voice Agent's Prompt
+### Path 2a: Iterate on a live agent — direct to main
 
-When Ben provides feedback or wants changes to an existing voice agent's prompt, invoke the `voice-ai-improve-prompt` skill. Which flag you pass depends entirely on what Ben asked for.
+Trigger phrases: "improve the prompt for X", "update John Giordani's prompt", "add Y to the prompt", "fix the greeting on [agent]", anything that does NOT mention a PR, MR, merge request, or review step.
 
-**Sub-workflow 2a — Without PR (default)**
+Steps:
+1. Invoke `voice-ai-improve-prompt` (no flag). The skill edits the prompt file (and any affected `kb-*.txt` siblings), commits to `main`, and pushes.
+2. Immediately after the skill returns, invoke `voice-ai-deploy-retell` with the absolute path to the edited prompt file. It reads the sidecar, calls `update_retell_llm`, resyncs any KBs that changed, updates `last_synced_at`, and commits the sidecar change.
+3. Report back: what was edited, what commit landed on `main`, what Retell state was updated.
 
-If Ben just says "improve the prompt for X", "update the prompt", "add Y to the prompt", or anything that does NOT explicitly mention a PR, MR, merge request, or review step, invoke the skill with no flag. The skill edits the prompt file, pushes directly to `main`, and then redeploys the Retell LLM so the live agent picks up the change immediately. That's the whole workflow on your end.
+### Path 2b: Iterate on a live agent — with PR
 
-**Sub-workflow 2b — With PR**
+Trigger phrases only when Ben explicitly asks for it: "with a PR", "open an MR", "don't push to main", "review first", "--with-pr". Also: Path 2b for review-mode runs ("apply the unresolved comments on MR !42", "review mode on <MR>", "pull feedback from <MR url>").
 
-Only if Ben explicitly asks for a PR, MR, or merge request ("with a PR", "open an MR", "don't push to main", "review first"), invoke the skill with `--with-pr`. In that case the skill pushes to a per-prompt branch and opens a merge request in GitLab. Everything after that happens on GitLab. Do NOT call `update_retell_llm` or `update_agent` in this sub-workflow — the redeploy happens after the MR is merged, out of band.
+Steps:
+1. Invoke `voice-ai-improve-prompt --with-pr` (or `voice-ai-improve-prompt` with an MR reference for review mode). The skill pushes to a per-prompt branch and opens (or extends) the MR.
+2. **Do NOT invoke `voice-ai-deploy-retell`.** Retell sync happens automatically when the MR merges — the `ai_prompts` repo has a GitLab CI `deploy-retell` job that POSTs a mission task to Claude Claw's dashboard API, which queues a new run of `voice-ai-deploy-retell` on your agent. You will see the mission task appear in your queue ~60 seconds after the merge; Claude Code will pick it up and run the deploy skill then.
+3. Report back: branch name, MR URL, and a note that Retell will auto-sync on merge.
 
-Default to sub-workflow 2a. Only go to 2b when Ben asks for it.
+### Standalone deploy-retell invocations
+
+Sometimes Ben wants a Retell-only change with no file edit — "swap the voice on John Giordani to Jennifer Suarez", "re-upload the KB file for A1 Biohazard", "the sidecar for X looks wrong, rebuild it". In these cases, invoke `voice-ai-deploy-retell` directly with Ben's instruction. Don't touch the prompt file; don't run the improve-prompt skill. The deploy skill handles param tweaks, KB-only syncs, and sidecar recovery without any file change.
+
+### Why the split matters
+
+Keeping files and Retell separate lets the `--with-pr` path actually work: the prompt change goes through human review in GitLab, and only the merged version ever hits Retell. If the skills were still merged, `--with-pr` would always leave Retell stale until Ben manually redeployed. Now it auto-deploys via CI.
 
 ## RetellAI MCP Tools Reference
 
