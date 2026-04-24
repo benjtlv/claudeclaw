@@ -114,7 +114,11 @@ Read [../../voice-ai-shared/assets/voice-agent-template.md](../../voice-ai-share
 9. **Task + Success Criteria**
 10. **Steps** — Greeting → Info collection (one field at a time) → Qualification (IF/ONLY IF) → Core value delivery → Appointment setting (if applicable) → Closing
 11. **Objection Handling** — 5-10 objections specific to this business
-12. **Notes** — copy RULES TO NEVER BREAK verbatim + business-specific rules
+12. **Notes** — copy RULES TO NEVER BREAK verbatim + business-specific rules. **Then add these mandatory rules** (template doesn't include them yet, but every prompt must have them — see [../../voice-ai-shared/references/speech-patterns.md](../../voice-ai-shared/references/speech-patterns.md)):
+    - **NEVER read `--` aloud as "dash dash" or any punctuation. Just pause naturally.** (per [retell-conventions.md](../../voice-ai-shared/references/retell-conventions.md))
+    - **NEVER answer more than the specific question asked.** Yes/no questions get yes/no answers. "How much" gets the price, not every tier and option. Let the caller drive what comes next. Volunteering related info without being asked is the most common AI tell.
+    - **NEVER restate what the caller just told you.** No parroting names, phone numbers, dates, or times back. Only spell back emails. Don't recap booking details at the end of the call — they know what they booked.
+    - **MIRROR the caller's energy, never inject enthusiasm they didn't bring.** Direct caller → direct agent. Chatty caller → chatty agent. Match, never exceed.
 
 ### Quality checklist (applies to both prompts)
 
@@ -125,6 +129,10 @@ Read [../../voice-ai-shared/assets/voice-agent-template.md](../../voice-ai-share
 - [ ] "Language to NEVER USE" list is in Notes
 - [ ] All RULES TO NEVER BREAK are present in Notes
 - [ ] One-question-at-a-time rule is in Notes
+- [ ] "NEVER read `--` aloud as 'dash dash'" guardrail is in Notes
+- [ ] "NEVER answer more than the specific question asked" rule is in Notes
+- [ ] "NEVER restate what the caller just told you" rule is in Notes
+- [ ] "MIRROR caller energy, never inject enthusiasm they didn't bring" rule is in Notes
 - [ ] Variable names defined for all collected fields
 - [ ] Pushy caller rescue block is present
 - [ ] Appointment setting has timezone + AM/PM rules (if applicable)
