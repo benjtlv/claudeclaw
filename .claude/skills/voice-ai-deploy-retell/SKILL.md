@@ -5,6 +5,38 @@ description: Syncs Retell state to match a voice AI agent's prompt files, or app
 
 # Voice AI — Deploy Retell
 
+## Account pinning (first action on every run, no exceptions)
+
+Every Retell call in a single run goes to exactly ONE Retell account, derived from the prompt file's folder path. Do this derivation BEFORE any other work, before reading the sidecar, before any tool call.
+
+### Path → account slug
+
+| Path pattern (under `ai_prompts/` root) | Account slug |
+|---|---|
+| `CLIENTS/GENERAL/<any>/...` | `novanest` (these agents live in Ben's internal Retell account) |
+| `CLIENTS/<CLIENT>/...` (not `GENERAL`) | slugify `<CLIENT>` — lowercase, spaces→hyphens, punctuation stripped. `VOCI PARTNERS` → `voci-partners`. |
+| `PROSPECTS/**`, `DEMOS/**`, `INTERNAL/**` | `novanest` |
+| `ARCHIVE/**` | refuse — the skill does not touch archived agents |
+
+### Slug → tools
+
+- **MCP prefix:** `mcp__<slug>-retellai-mcp-server__<tool>`. Examples:
+  - `novanest` → `mcp__novanest-retellai-mcp-server__update_retell_llm`
+  - `voci-partners` → `mcp__voci-partners-retellai-mcp-server__update_retell_llm`
+- **REST API key env var** (for KB ops that have no MCP equivalent and require multipart/form-data REST calls):
+  - `novanest` → `RETELL_API_KEY` (no suffix — preserves the existing convention)
+  - any other slug → `RETELL_API_KEY_<SLUG_UPPER>` where `<SLUG_UPPER>` is the slug uppercased with hyphens→underscores. `voci-partners` → `RETELL_API_KEY_VOCI_PARTNERS`.
+
+### Pre-flight checks (do both before any Retell work)
+
+1. **MCP availability:** Verify `mcp__<slug>-retellai-mcp-server__*` is in your available tool list. If missing, STOP — tell Ben to add the MCP to his `.mcp.json`. Do NOT fall back to `novanest` or any other account, even if another MCP happens to have an agent with the same derived name.
+2. **REST key availability** (only if you'll hit a REST-only endpoint this run — KB ops): verify the matching env var is set. If missing, STOP and tell Ben to add it to his `.env`.
+3. For the rest of the run, every Retell call — MCP tool invocation OR REST `curl` — uses ONLY the pinned slug's prefix / env var. No cross-account calls, ever.
+
+When Ben onboards a new client, he does two things manually and in parallel: adds the MCP under `<slug>-retellai-mcp-server` and sets `RETELL_API_KEY_<SLUG_UPPER>` in `.env`. Both naming rules are mechanical, so "which MCP do I use here?" never has a judgment call in it.
+
+---
+
 ## What this skill does
 
 This is the single primitive for pushing change into Retell. Every path that needs the live agent to reflect a new state lands here:
@@ -72,8 +104,8 @@ Optional additional inputs the caller may include in the invocation prompt:
 ## Repo and environment facts
 
 - Prompts repo local path (Mac): `/Users/benjaminelkrieff/Documents/Claude Code Master Folder/ai_prompts`.
-- `RETELL_API_KEY`: read from `.claude/.mcp.json` env (loaded when MCP is active) or from `RETELL_API_KEY` env var in a CI context.
-- NovaNest RetellAI MCP is preferred for every operation that has a tool. If MCP isn't available, fall back to REST via `curl` with `Authorization: Bearer $RETELL_API_KEY`. Query Context7 first for any endpoint you haven't used recently — the API shape evolves.
+- Retell API keys: see **Account pinning** above for the per-account env var convention. `RETELL_API_KEY` is novanest; clients use `RETELL_API_KEY_<SLUG_UPPER>`.
+- The pinned-account's RetellAI MCP (derived per Account pinning) is preferred for every operation that has a tool. If an operation isn't exposed by the MCP (mainly KB ops), fall back to REST via `curl` using the pinned account's API key. Query Context7 first for any endpoint you haven't used recently — the API shape evolves.
 
 ## RetellAI MCP tool map
 
