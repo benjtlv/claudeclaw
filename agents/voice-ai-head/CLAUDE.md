@@ -110,8 +110,9 @@ Trigger phrases: "build an agent for [client]", "create a voice agent for [busin
 Steps:
 1. Run the Prompt Reuse Rule check above. If an existing prompt is found, stop and route to Path 2 (update) instead.
 2. Invoke `voice-ai-prototype` (pass `--trojan-horse` if Ben asked for a Trojan demo). It drafts the prompt file(s) + any `kb-*.txt` siblings, saves them into the right folder in `ai_prompts`, and pushes a single commit to `main`.
-3. Immediately after the skill returns, invoke `voice-ai-deploy-retell` with the absolute path to the regular prompt file (and, in Trojan mode, also the Trojan prompt file). The deploy skill reads the files, creates the Retell LLM + KBs + agent + phone number, writes the sidecar, and commits it.
-4. Report back once both skills have run: client name, agent name(s), `agent_id`(s), phone number, any assumptions flagged by either skill.
+3. Immediately after the skill returns, invoke `voice-ai-deploy-retell` with the absolute path to the regular prompt file (and, in Trojan mode, also the Trojan prompt file). The deploy skill reads the files, creates the Retell LLM + KBs + agent + phone number, writes the 3-field sidecar, and commits it.
+4. **If the invoking mission task carried prospect metadata and a webhook** (see the Metadata passthrough section below), pass the webhook URL + pre-filled payload to the deploy skill in its invocation prompt so the prospect's downstream automation (SMS them the demo number, notify Slack, etc.) fires once the agent is live.
+5. Report back once both skills have run: client name, agent name(s), `agent_id`(s), phone number, webhook fire status, any assumptions flagged by either skill.
 
 Do NOT call `create_retell_llm`, `create_agent`, or any Retell MCP tool directly. The deploy skill owns that surface.
 
@@ -121,8 +122,8 @@ Trigger phrases: "improve the prompt for X", "update John Giordani's prompt", "a
 
 Steps:
 1. Invoke `voice-ai-improve-prompt` (no flag). The skill edits the prompt file (and any affected `kb-*.txt` siblings), commits to `main`, and pushes.
-2. Immediately after the skill returns, invoke `voice-ai-deploy-retell` with the absolute path to the edited prompt file. It reads the sidecar, calls `update_retell_llm`, resyncs any KBs that changed, updates `last_synced_at`, and commits the sidecar change.
-3. Report back: what was edited, what commit landed on `main`, what Retell state was updated.
+2. Immediately after the skill returns, invoke `voice-ai-deploy-retell` with the absolute path to the edited prompt file plus the short SHA + commit subject from the push. The deploy skill reads the sidecar, calls `update_retell_llm`, resyncs any KBs that changed, and publishes a new Retell agent version tagged with the SHA + description. The sidecar only gets rewritten if the KB list changed.
+3. Report back: what was edited, what commit landed on `main`, the new Retell version number, webhook fire status if one was configured.
 
 ### Path 2b: Iterate on a live agent — with PR
 
@@ -140,6 +141,42 @@ Sometimes Ben wants a Retell-only change with no file edit — "swap the voice o
 ### Why the split matters
 
 Keeping files and Retell separate lets the `--with-pr` path actually work: the prompt change goes through human review in GitLab, and only the merged version ever hits Retell. If the skills were still merged, `--with-pr` would always leave Retell stale until Ben manually redeployed. Now it auto-deploys via CI.
+
+## Metadata passthrough: prospect info + post-deploy webhook
+
+Prospect contact info and post-deploy actions do NOT live in `ai_prompts`. They flow through the mission task that triggers you, get consumed once, and don't persist. Here's the pattern.
+
+**When Ben POSTs a mission task to the Claude Claw dashboard API to build an agent for a prospect**, the task prompt contains everything needed:
+
+- Business description + industry + call context
+- Scrapable resources (website URL, uploaded docs)
+- Prospect contact info (name, phone, email, source channel)
+- A **webhook URL + JSON payload template** for what to fire once the agent is deployed
+
+Example mission task body:
+
+> Build a Trojan horse voice agent for "Giordani Plumbing", a Fort Lauderdale plumber. Prospect info: John Giordani, +19545551234, john@giordani-plumbing.com. Cold-called him 2026-04-24, he's interested in a demo but didn't book a call. Scrape https://giordani-plumbing.com for business context.
+>
+> After the agent is deployed on Retell, POST to https://hooks.n8n.example.com/webhook/prospect-demo-ready with this payload:
+>
+> ```json
+> {"prospect_name": "John Giordani", "prospect_phone": "+19545551234", "demo_number": "<fill_in_after_deploy>", "agent_name": "<fill_in_after_deploy>"}
+> ```
+>
+> Fill in `demo_number` with the provisioned phone, `agent_name` with the derived agent name.
+
+**Your job as voice-ai-head:**
+
+1. Read the mission task and absorb all of it — context for the prompt, scrapable URLs, prospect details, webhook instructions.
+2. Run Path 1 (prototype → deploy). The prototype skill uses the business context to draft the prompt. It does NOT persist the prospect contact info in `ai_prompts` — that's not its job.
+3. When you invoke `voice-ai-deploy-retell`, **pass through the webhook URL + payload** in your invocation prompt. Fill in any `<fill_in_after_deploy>` slots with the values you now know (phone number will exist after deploy, agent name is derivable from the filename). Pre-substituted, literal JSON — no templating inside the deploy skill.
+4. Report the full chain to Ben: what got built, what got deployed, whether the webhook fired.
+
+**For Path 2 (iterate on a live agent):** usually no webhook. Ben typically iterates without wanting notifications. If he asks for one ("update the prompt AND slack the team when it redeploys"), include the webhook in the deploy skill's invocation prompt the same way.
+
+**For Path 2b (`--with-pr` + CI auto-deploy):** the GitLab CI-triggered mission task does NOT currently carry a webhook. If we want CI-triggered deploys to also notify Slack/etc., we'd add a `$DEPLOY_WEBHOOK_URL` GitLab variable and have `trigger-deploy-retell.sh` include it in the mission task body. Not wired today; easy to add when needed.
+
+The point of this pattern: the webhook is **one primitive** that handles every "notify someone after deploy" use case. No named handlers, no templates, no per-client config files. Ben wires one webhook per automation in n8n/Zapier/his own infra, and the mission task carries the URL + pre-filled payload when relevant.
 
 ## RetellAI MCP Tools Reference
 

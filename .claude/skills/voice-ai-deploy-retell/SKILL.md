@@ -1,6 +1,6 @@
 ---
 name: voice-ai-deploy-retell
-description: Syncs Retell state to match a voice AI agent's prompt files, or applies a free-form Retell-side change. Handles every Retell API interaction for the voice-ai stack — full first-time deploy (create LLM + KBs + agent + phone + sidecar), prompt-only redeploy, KB-only resync, agent parameter tweaks (voice, temperature, language), and sidecar recovery when metadata is missing. Use this skill whenever Retell needs to change — whether as a follow-up to `voice-ai-prototype` (first deploy), `voice-ai-improve-prompt` direct mode (post-push redeploy), a GitLab CI-triggered mission task after an MR merges (deploy merged prompt), or standalone ("swap John Giordani's voice to Jennifer Suarez", "re-upload the KB file for A1 Biohazard", "the sidecar for X is missing, rebuild it"). Triggers: "deploy retell for <file>", "redeploy <client>'s agent", "update retell agent", "push the prompt to retell", "sync the kb", "change the voice on <agent>", "rebuild the sidecar for <client>". Do NOT use this skill to edit a prompt or KB file — that's `voice-ai-improve-prompt`. Do NOT use it for first-time prompt drafting — that's `voice-ai-prototype`. This skill only touches Retell and the sidecar file.
+description: Syncs Retell state to match a voice AI agent's prompt files, or applies a free-form Retell-side change. The single skill for every Retell API interaction in the voice-ai stack — full first-time deploy (create LLM + KBs + agent + phone + sidecar), prompt-only redeploy, KB-only resync, agent parameter tweaks (voice, temperature, language), and sidecar recovery. Every non-create deploy publishes a new Retell agent version tagged with commit SHA + one-line description, so Retell's own version history is the audit trail — the local sidecar stays minimal. Accepts an optional post-deploy webhook (URL + JSON payload) that fires once after a successful deploy, fire-and-forget; the caller pre-fills whatever JSON the downstream automation expects (Slack, SMS, anything). Use this skill whenever Retell needs to change — as a follow-up to `voice-ai-prototype` (first deploy), after `voice-ai-improve-prompt` direct mode (post-push redeploy), on a GitLab CI-triggered mission task (post-merge deploy), or standalone ("swap John Giordani's voice to Jennifer Suarez", "re-upload the KB file for A1 Biohazard", "rebuild the sidecar for X"). Triggers: "deploy retell for <file>", "redeploy <client>'s agent", "update retell agent", "push the prompt to retell", "sync the kb", "change the voice on <agent>", "rebuild the sidecar for <client>". Do NOT use this skill to edit a prompt or KB file — that's `voice-ai-improve-prompt`. Do NOT use it for first-time prompt drafting — that's `voice-ai-prototype`. This skill only touches Retell, the sidecar file, and (optionally) one webhook.
 ---
 
 # Voice AI — Deploy Retell
@@ -9,13 +9,37 @@ description: Syncs Retell state to match a voice AI agent's prompt files, or app
 
 This is the single primitive for pushing change into Retell. Every path that needs the live agent to reflect a new state lands here:
 
-- A brand-new prompt that was just produced by `voice-ai-prototype` — deploy it end-to-end (create LLM, create KBs, create agent, provision phone, write sidecar).
-- A prompt file that was just edited and pushed by `voice-ai-improve-prompt` direct mode — update the existing LLM's `general_prompt` and resync any KBs.
-- A prompt that just landed on `main` via merged MR — same as above, but triggered by the Claude Claw mission task that GitLab CI queued.
-- A one-off Retell tweak that has nothing to do with any file change (swap voice, bump temperature, change language, re-attach a KB). No commit, no file edit.
-- A sidecar file that's missing, stale, or corrupt — resolve the agent by name, rebuild the sidecar from Retell's current state.
+- A brand-new prompt that was just produced by `voice-ai-prototype` — deploy end-to-end (create LLM, create KBs, create agent, provision phone, write sidecar).
+- A prompt file that was just edited and pushed by `voice-ai-improve-prompt` direct mode — update the existing LLM's `general_prompt`, resync any changed KBs, publish a new Retell agent version.
+- A prompt that just landed on `main` via merged MR — same as above, but triggered by the Claude Claw mission task that GitLab CI queued. Commit SHA and MR title ride in on the task body and become the Retell version metadata.
+- A one-off Retell tweak that has nothing to do with any file change (swap voice, bump temperature, change language, re-attach a KB). No commit, no file edit, no sidecar change — just the Retell call.
+- A sidecar file that's missing, stale, or corrupt — resolve the agent by name, rebuild the 3-field sidecar from Retell's current state.
 
 The skill does NOT edit prompt files or KB files. If the user's ask requires a file change, they want `voice-ai-improve-prompt`, not this skill. Refuse and route.
+
+## Sidecar schema (canonical, minimal)
+
+The sidecar lives next to the prompt file at `<prompt-basename>.retell.json`. Three fields, nothing more:
+
+```json
+{
+  "agent_id": "agent_abc...",
+  "llm_id": "llm_xyz...",
+  "knowledge_bases": [
+    { "source_file": "kb-faqs.txt", "id": "kb_..." }
+  ]
+}
+```
+
+Omit `knowledge_bases` entirely (not an empty array) when there are none.
+
+Every other attribute — voice, model, temperature, phone number, area code, language, timestamps, mode, Trojan sibling cross-links — is either derivable from the filename or authoritatively owned by Retell and queryable on demand. The sidecar is purely the *binding* from "this prompt file" to "these Retell resources". Nothing more.
+
+`llm_id` is strictly derivable via `get_agent(agent_id).response_engine.llm_id` but kept as a cache because it's the primary handle for prompt updates — saves one round-trip per deploy.
+
+`knowledge_bases[*].id` is kept because mapping a local `kb-*.txt` file to its Retell KB by name convention alone is brittle (Retell names can drift). Storing the ID keeps the mapping robust. `source_id` (the inner-source ID inside each KB) is NOT stored — the skill fetches it on demand during KB resync via `get-knowledge-base/{id}` when it actually needs to mutate a source.
+
+Trojan pairs get two separate sidecars (one per prompt file). No cross-linking needed — the sibling file is in the same folder; read its sidecar when you need its `agent_id`.
 
 ## Choosing the intent
 
@@ -23,12 +47,12 @@ When invoked, inspect (in this order) the caller's handoff message, the file sta
 
 | Intent | When to pick it |
 |---|---|
-| **Full deploy** (create) | Caller named a prompt file with no sidecar AND no agent in Retell with that derived name. Typical caller: `voice-ai-prototype` just finished. |
-| **Prompt-only update** | Caller named a prompt file, sidecar exists with `llm_id`, agent exists in Retell. No KB files changed since last sync (check sidecar's `last_synced_at` vs `kb-*.txt` mtime). Typical caller: `voice-ai-improve-prompt` direct mode, or CI-triggered mission task. |
-| **KB-only sync** | Caller named a KB file (or said "resync KBs for X"), or the prompt file is unchanged but `kb-*.txt` files are newer than `last_synced_at`. |
-| **Full file sync** | Both prompt and at least one KB file changed since `last_synced_at`. Update prompt + resync all KBs in one pass. |
-| **Agent param tweak** | Caller's instruction names an agent attribute with no file context (voice, temperature, language, webhook URL, end-call phrases, interruption sensitivity). No file is read, no commit is made. |
-| **Sidecar recovery** | Caller says "rebuild sidecar" or named a prompt file whose sidecar is missing/corrupt but the Retell agent exists under the derived name. |
+| **Full deploy** (create) | Caller named a prompt file with no sidecar AND no agent in Retell under the derived name. Typical caller: `voice-ai-prototype` just finished. |
+| **Prompt-only update** | Caller named a prompt file, sidecar exists with `llm_id`, no local `kb-*.txt` file has been touched since the last deploy. Typical caller: `voice-ai-improve-prompt` direct mode, or CI-triggered mission task. |
+| **KB-only sync** | Caller named a KB file (or said "resync KBs for X"), or the prompt itself is unchanged but `kb-*.txt` files differ from the sidecar's `knowledge_bases[]`. |
+| **Full file sync** | Both prompt and at least one KB changed. Update prompt + resync all KBs in one pass, single Retell version. |
+| **Agent param tweak** | Caller's instruction names an agent attribute (voice, temperature, language, etc.) with no file context. No file is read, no sidecar is written, no commit is made. |
+| **Sidecar recovery** | Caller says "rebuild sidecar" or any other intent failed because the sidecar is missing/corrupt but the agent exists in Retell. |
 
 If two intents fit (e.g., a merged MR that touched both prompt and KBs), pick **Full file sync**. If zero intents fit, stop and ask the caller what they want.
 
@@ -37,15 +61,19 @@ Never combine a file-driven intent with a param tweak in one run. Finish the fil
 ## Inputs the skill accepts
 
 - A prompt file path (most common). Example: `CLIENTS/JOHN GIORDANI/john-giordani-voice-agent-prompt.md`. Path is relative to `ai_prompts/` root unless absolute.
-- A KB file path. Example: `CLIENTS/JOHN GIORDANI/kb-faqs.txt`. Skill resolves sibling prompt for KB-only sync.
-- A client name plus a free-form Retell-side instruction. Example: "swap John Giordani's voice to Jennifer Suarez". Skill resolves agent via sidecar or `list_agents`.
-- A client name alone plus "rebuild sidecar". Skill queries Retell by derived name and writes sidecar.
+- A KB file path. Example: `CLIENTS/JOHN GIORDANI/kb-faqs.txt`. Skill resolves the sibling prompt for KB-only sync.
+- A client name plus a free-form Retell-side instruction. Example: "swap John Giordani's voice to Jennifer Suarez". Skill resolves the agent via the sidecar or `list_agents`.
+- A client name alone plus "rebuild sidecar".
+
+Optional additional inputs the caller may include in the invocation prompt:
+- A commit SHA + short description for Retell version tagging (the CI pipeline always includes these; callers can too).
+- A webhook URL + JSON payload to fire after a successful deploy (see **Post-deploy webhook** below).
 
 ## Repo and environment facts
 
-- Prompts repo local path: `/Users/benjaminelkrieff/Documents/Claude Code Master Folder/ai_prompts` (on Ben's Mac). Historical references in older skills point at `C:\Users\benelk\Documents\ai_prompts` — that was the Windows path. Always resolve dynamically: `cd "$(git -C "$HOME/Documents/Claude Code Master Folder/ai_prompts" rev-parse --show-toplevel)"` or use the absolute Mac path above.
-- `RETELL_API_KEY`: read from `.claude/.mcp.json` env (already loaded when MCP is active) or from `RETELL_API_KEY` env var in a CI context.
-- NovaNest RetellAI MCP is preferred for every operation that has a tool. If MCP isn't available (running inside GitLab CI that called the Claude Claw agent by HTTP — the agent itself has MCP, so this case is only for edge environments), fall back to REST via `curl` with `Authorization: Bearer $RETELL_API_KEY`. For unfamiliar endpoints, query Context7 first (`resolve-library-id` "retell ai" → `query-docs`).
+- Prompts repo local path (Mac): `/Users/benjaminelkrieff/Documents/Claude Code Master Folder/ai_prompts`.
+- `RETELL_API_KEY`: read from `.claude/.mcp.json` env (loaded when MCP is active) or from `RETELL_API_KEY` env var in a CI context.
+- NovaNest RetellAI MCP is preferred for every operation that has a tool. If MCP isn't available, fall back to REST via `curl` with `Authorization: Bearer $RETELL_API_KEY`. Query Context7 first for any endpoint you haven't used recently — the API shape evolves.
 
 ## RetellAI MCP tool map
 
@@ -54,26 +82,34 @@ Never combine a file-driven intent with a param tweak in one run. Finish the fil
 | Create LLM | `create_retell_llm` | `POST /create-retell-llm` |
 | Get LLM | `get_retell_llm` | `GET /get-retell-llm/{llm_id}` |
 | Update LLM | `update_retell_llm` | `PATCH /update-retell-llm/{llm_id}` |
-| List LLMs | `list_retell_llms` | `GET /list-retell-llms` |
 | Create agent | `create_agent` | `POST /create-agent` |
 | Get agent | `get_agent` | `GET /get-agent/{agent_id}` |
 | Update agent | `update_agent` | `PATCH /update-agent/{agent_id}` |
 | List agents | `list_agents` | `GET /list-agents` |
+| List agent versions | `get_agent_versions` | `GET /get-agent-versions/{agent_id}` |
+| **Publish agent** | `agent.publish` (SDK) | `POST /publish-agent/{agent_id}` (no body) |
 | Create phone number | `create_phone_number` | `POST /create-phone-number` |
 | List phone numbers | `list_phone_numbers` | `GET /list-phone-numbers` |
 | Update phone number | `update_phone_number` | `PATCH /update-phone-number/{phone_number}` |
 | List voices | `list_voices` | `GET /list-voices` |
-| **Create knowledge base** | no MCP — REST only | `POST /create-knowledge-base` |
-| **Add source to KB** | no MCP — REST only | `POST /add-knowledge-base-sources` |
-| **Delete source from KB** | no MCP — REST only | `DELETE /delete-knowledge-base-source` |
-| **Delete KB** | no MCP — REST only | `DELETE /delete-knowledge-base/{kb_id}` |
-| **Attach KB to LLM** | no MCP — via `update_retell_llm` `knowledge_base_ids` field | same |
+| **Create knowledge base** | no MCP — REST only | `POST /create-knowledge-base` (multipart/form-data) |
+| **Add source to KB** | no MCP — REST only | `POST /add-knowledge-base-sources/{kb_id}` (multipart/form-data) |
+| **Delete source from KB** | no MCP — REST only | `DELETE /delete-knowledge-base-source/{kb_id}/source/{source_id}` |
+| **Attach KB to LLM** | via `update_retell_llm` `knowledge_base_ids` field | same |
+
+Both `create-knowledge-base` and `add-knowledge-base-sources` require **multipart/form-data** (files are uploaded as form fields like `knowledge_base_files=@./kb-faqs.txt`, NOT as JSON). Use `curl --form` or equivalent — sending JSON will fail.
 
 For every KB operation, confirm current payload shape with Context7 before the call — the REST surface evolves.
 
-## Derived agent name (how to map a prompt file to an agent name)
+## Model enum (current, as of this writing)
 
-Rules (same rules `voice-ai-prototype` uses, so collision checks and lookups agree):
+Retell's supported LLM model enum is much broader than `gpt-4.1`: `gpt-4.1`, `gpt-4.1-mini`, `gpt-4.1-nano`, `gpt-5`, `gpt-5-mini`, `gpt-5-nano`, `gpt-5.1`, `gpt-5.2`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-nano`, `claude-4.5-sonnet`, `claude-4.6-sonnet`, `claude-4.5-haiku`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-3.0-flash`. Default for new deploys is `gpt-4.1` (anchored in this skill), but the caller can override.
+
+Note: `model` and `model_temperature` are settable at `create_retell_llm` time and via `RetellLlmOverride`, but the `update-retell-llm` endpoint does NOT accept them in its request body (only `begin_message`, `general_prompt`, `general_tools`, `states`). Changing model or temperature on a live LLM therefore requires recreating the LLM and re-pointing the agent's `response_engine.llm_id` — see **Agent param tweak** intent.
+
+## Derived agent name
+
+Rules (shared with `voice-ai-prototype` so collision checks and lookups agree):
 
 1. Take the prompt filename, strip `.md` or `.txt`.
 2. Strip trailing `-prompt` or `-voice-agent-prompt` if present. Keep a trailing `-trojan` marker.
@@ -83,45 +119,74 @@ Rules (same rules `voice-ai-prototype` uses, so collision checks and lookups agr
 Examples:
 - `john-giordani-voice-agent-prompt.md` → `JOHN GIORDANI VOICE AGENT`
 - `john-giordani-prompt-trojan.md` → `JOHN GIORDANI TROJAN`
-- `claim-warriors-inbound-prompt.md` → `CLAIM WARRIORS INBOUND VOICE AGENT`
 
 If the derived name would be just `VOICE AGENT` or `PROMPT VOICE AGENT` (filename too generic), stop and ask the caller for an explicit agent name.
 
-## Sidecar schema (canonical)
+---
 
-The sidecar lives next to the prompt file at `<prompt-basename>.retell.json`. Omit `knowledge_bases` entirely if there are none (don't emit an empty array). Omit `phone_number`, `phone_status`, `area_code`, and `sibling_*` fields when they don't apply.
+## Retell agent versioning (applies to every non-create deploy)
 
-```json
-{
-  "agent_name": "JOHN GIORDANI VOICE AGENT",
-  "agent_id": "agent_abc...",
-  "llm_id": "llm_xyz...",
-  "model": "gpt-4.1",
-  "model_temperature": 0.0,
-  "voice": { "name": "Jennifer Suarez", "voice_id": "..." },
-  "phone_number": "+19545550123",
-  "phone_status": "active",
-  "area_code": "954",
-  "knowledge_bases": [
-    {
-      "name": "JOHN GIORDANI VOICE AGENT — Faqs",
-      "id": "kb_...",
-      "source_file": "kb-faqs.txt",
-      "source_id": "source_..."
-    }
-  ],
-  "prompt_file": "CLIENTS/JOHN GIORDANI/john-giordani-voice-agent-prompt.md",
-  "mode": "regular",
-  "sibling_regular_agent_id": null,
-  "sibling_trojan_agent_id": null,
-  "created_at": "2026-04-24T18:00:00Z",
-  "last_synced_at": "2026-04-24T18:00:00Z"
-}
+Retell maintains native version history per agent. Each `update_*` call mutates a mutable **draft**; calling `POST /publish-agent/{agent_id}` freezes that draft as an immutable published version N and spawns a fresh draft N+1. Phone numbers assigned to "Draft" always follow the latest — which is what we want for auto-deploy.
+
+**Version metadata is tagged on `update_agent`, NOT on the publish call.** The publish endpoint takes no body. `update_retell_llm` doesn't accept `version_description` either. The only place description + SHA survive into version history is `update_agent.version_description`. So the flow is: update LLM → update agent (with description) → publish.
+
+**What tags a version:**
+
+- **Commit SHA (short, 7 chars):** from the caller's invocation prompt if provided (CI passes `$CI_COMMIT_SHA`), otherwise `git -C <ai_prompts> rev-parse --short HEAD`.
+- **Description (one line):** MR title on the CI path, commit subject on the direct-mode path, or the caller's instruction text (truncated to ~100 chars) for a standalone invocation. Combined as `"<sha> <description>"`.
+
+### The 5-step publish sequence (used by every non-create intent)
+
+```
+1. current_llm = get_retell_llm(llm_id)
+   # capture current begin_message — REQUIRED on update_retell_llm, would
+   # otherwise fail if we only sent general_prompt
+
+2. update_retell_llm(llm_id,
+                     begin_message = current_llm.begin_message,
+                     general_prompt = <new prompt contents>,
+                     knowledge_base_ids = <updated list if KBs changed>)
+   # bumps the draft LLM's version counter
+
+3. updated_llm = get_retell_llm(llm_id)
+   # capture the new draft version number
+
+4. update_agent(agent_id,
+                response_engine = { type: "retell-llm",
+                                    llm_id: llm_id,
+                                    version: updated_llm.version },
+                version_description = "<sha> <title>")
+   # pins the draft agent to the new LLM draft version AND tags
+   # the draft agent description
+
+5. POST /publish-agent/{agent_id}
+   # freezes draft as published version N, creates new draft N+1
 ```
 
-`mode` is `"regular"` or `"trojan"`. In Trojan pairs, both sidecars carry `sibling_regular_agent_id` / `sibling_trojan_agent_id` pointing at the other. The Trojan sidecar holds the phone number; the regular sidecar has `phone_number: null, phone_status: "awaiting post-sale assignment"`.
+Subsequent `get_agent_versions(agent_id)` then shows `version_description` on each published entry — that's our audit trail.
 
-`last_synced_at` gets rewritten on every successful run of this skill. `created_at` is immutable after the first deploy.
+**On create deploys (first-time):**
+- `create_retell_llm` with `begin_message`, `general_prompt`, `knowledge_base_ids`, model, `model_temperature`.
+- `create_agent` with `response_engine`, `voice_id`, and `version_description: "<sha> initial deploy"`.
+- Skip the explicit publish — the initial create IS version 0/1.
+
+**Failure handling:**
+- If `update_retell_llm` or `update_agent` fails, the Retell state is unchanged (atomic per call). Stop, surface the error.
+- If they succeed but `publish-agent` fails, the live agent IS updated (the draft is what Draft-pinned phones serve), but no immutable version entry exists for rollback. Surface loudly in the report — don't fail the whole deploy.
+
+---
+
+## Post-deploy webhook (optional)
+
+If the invocation prompt includes a webhook URL + JSON payload, fire it **once**, after the Retell work succeeds:
+
+1. POST the caller-supplied JSON payload to the caller-supplied URL, `Content-Type: application/json`, 15-second timeout.
+2. Fire-and-forget: a connection failure or non-2xx response is logged in the final report but does NOT mark the deploy as failed. The agent is already live.
+3. No templating inside this skill. No variable substitution. The caller — `voice-ai-head` orchestrating a prospect build, or CI passing through an env-var-defined URL — has already filled the payload with whatever literal values the downstream automation expects.
+
+**Parsing the webhook from the invocation prompt:** look for a clear signal like "POST to <url> with this payload: { ... }" or "after deploy, webhook to <url> with { ... }". If the URL is there but the payload is absent, POST an empty `{}` body. If the payload is there but the URL is absent, ignore — don't guess URLs.
+
+**Reporting:** every run's report ends with a webhook status line: `Webhook: fired (HTTP 200)`, `Webhook: failed (connection refused)`, or `Webhook: none configured`.
 
 ---
 
@@ -132,7 +197,7 @@ Used for first-time deploys. Caller is typically `voice-ai-prototype` handing of
 ### 1. Validate inputs
 
 - Confirm the prompt file exists.
-- Confirm no sidecar exists yet. If one does, this is not a first-time deploy — switch to the matching update intent.
+- Confirm no sidecar exists yet. If one does, switch to the matching update intent.
 - Confirm no agent exists in Retell under the derived name (`list_agents`, case-insensitive compare). If one does, refuse with the existing `agent_id`.
 - For Trojan mode: both the regular and Trojan prompts must exist as siblings in the same folder before deploying either.
 
@@ -140,24 +205,24 @@ Used for first-time deploys. Caller is typically `voice-ai-prototype` handing of
 
 - Model: `gpt-4.1`
 - Voice: Jennifer Suarez. Look up `voice_id` at runtime via `list_voices` — name is the anchor, never a hardcoded ID.
-- Default area code: `954` (South Florida). If the caller specified a different one, use theirs.
+- Default area code: `954`. Use caller's value if they specified one.
 
 ### 3. Create LLM(s)
 
-Regular: `create_retell_llm` with `model: "gpt-4.1"`, `general_prompt: <regular prompt file contents>`, `model_temperature: 0` (Retell default unless caller specified otherwise). Capture `llm_id_regular`.
+Regular: `create_retell_llm` with `model: "gpt-4.1"`, `general_prompt: <regular prompt file contents>`, `model_temperature: 0`. Capture `llm_id_regular`.
 
-Trojan (when a sibling `-trojan.md` exists): create a second LLM with the Trojan prompt's contents. Consider bumping `model_temperature` by 0.1 for the Trojan LLM only (makes the sales segue feel less scripted). Flag the choice in the final report. Capture `llm_id_trojan`.
+Trojan (when a sibling `-trojan.md` exists): create a second LLM with the Trojan prompt's contents. Consider bumping `model_temperature` by 0.1 on the Trojan LLM only (makes the sales segue feel less scripted). Flag the choice in the final report. Capture `llm_id_trojan`.
 
 ### 4. Create knowledge bases and attach
 
 For each `kb-*.txt` in the prompt's folder:
 
-1. KB name: `<REGULAR AGENT NAME> — <topic>`, where `<topic>` is the filename segment between `kb-` and `.txt`, title-cased. Example: `kb-faqs.txt` → `JOHN GIORDANI VOICE AGENT — Faqs`. In Trojan mode the KB name still anchors to the regular name — both agents share KBs, no duplication.
+1. KB name: `<REGULAR AGENT NAME> — <topic>`, where `<topic>` is the filename segment between `kb-` and `.txt`, title-cased. Example: `kb-faqs.txt` → `JOHN GIORDANI VOICE AGENT — Faqs`. Trojan pairs share KBs anchored to the regular name.
 2. REST: `POST /create-knowledge-base` to create the KB container.
-3. REST: `POST /add-knowledge-base-sources` to upload the `.txt` as a source. Capture `source_id`.
+3. REST: `POST /add-knowledge-base-sources` to upload the `.txt` as a source.
 4. Capture `knowledge_base_id`.
 
-After all KBs exist, attach them to both LLMs (Trojan mode) or just the one LLM (regular mode) by calling `update_retell_llm` with `knowledge_base_ids: [...]`.
+After all KBs exist, attach them to both LLMs (Trojan mode) or just the one LLM (regular mode) via `update_retell_llm` with `knowledge_base_ids: [...]`.
 
 If any KB step fails, report what was created and what failed, then stop. Don't leave half-wired agents.
 
@@ -165,29 +230,25 @@ If any KB step fails, report what was created and what failed, then stop. Don't 
 
 Regular agent: `create_agent` with:
 - `agent_name`: derived regular name
-- `response_engine`: `{ type: "retell-llm", llm_id: llm_id_regular }`
+- `response_engine`: `{ type: "retell-llm", llm_id: llm_id_regular, version: 0 }` (version 0 = latest draft of the LLM we just created)
 - `voice_id`: Jennifer Suarez
-- Other fields default unless the prompt file has a `Voice Settings` section to override
+- `version_description`: `"<short-sha> initial deploy"` where `<short-sha>` is `git -C <ai_prompts> rev-parse --short HEAD` or the SHA the caller passed in
 
-Capture `agent_id_regular`.
-
-Trojan mode: create a second agent with `agent_name` = derived Trojan name, `llm_id: llm_id_trojan`, same voice. Capture `agent_id_trojan`.
+Trojan mode: create a second agent with `agent_name` = derived Trojan name, `llm_id: llm_id_trojan`, same voice, same `version_description` format.
 
 ### 6. Provision phone number
 
 Regular mode: `create_phone_number` with `area_code` (caller's or `954`), `inbound_agent_id: agent_id_regular`. Capture `phone_number`.
 
-Trojan mode: `create_phone_number` with `inbound_agent_id: agent_id_trojan` — the phone routes to the **Trojan** agent only. The regular agent stays phone-less, `phone_status: "awaiting post-sale assignment"`.
+Trojan mode: `create_phone_number` with `inbound_agent_id: agent_id_trojan`. The phone routes to the Trojan agent only. The regular agent stays phone-less.
 
-If no number is available in the requested area code, surface Retell's error verbatim and ask for a fallback area code. Don't silently pick a different one.
+If no number is available in the requested area code, surface Retell's error verbatim and ask for a fallback. Don't silently pick a different one.
 
 ### 7. Write sidecar(s)
 
-Write per the schema above. Regular mode → one sidecar next to the prompt. Trojan mode → two sidecars (one next to each prompt), with `sibling_*` fields cross-linking them.
+Three fields only, per the schema above. Regular mode → one sidecar next to the prompt. Trojan mode → two sidecars (one next to each prompt), each with its own `agent_id` / `llm_id`. Both sidecars reference the same `knowledge_bases[]` entries (same IDs, same source files).
 
 ### 8. Git commit the sidecar(s)
-
-The prompt and KB files were already committed by `voice-ai-prototype`. Only the sidecar is new here.
 
 ```bash
 cd "<ai_prompts root>"
@@ -198,7 +259,11 @@ git push origin main
 
 If push rejects non-fast-forward, `git pull --rebase origin main` and retry once. If rebase conflicts, stop.
 
-### 9. Report back
+### 9. Fire the webhook (if configured)
+
+Per **Post-deploy webhook** above.
+
+### 10. Report back
 
 ```
 Created in Retell:
@@ -208,9 +273,10 @@ Created in Retell:
   Voice:      Jennifer Suarez
   Phone:      +1 (954) 555-0123  (area: 954 default)
   KBs:
-    - JOHN GIORDANI VOICE AGENT — Faqs  (kb_...)
+    - kb-faqs.txt -> kb_abc...
 
-Sidecar written + committed: <short-sha>
+Sidecar:  committed <short-sha>
+Webhook:  fired (HTTP 200)   | or: none configured | or: failed (...)
 ```
 
 Trojan mode: include both agents, note the phone is bound to Trojan only, include "Demo number to send the lead: <phone>".
@@ -221,17 +287,22 @@ Trojan mode: include both agents, note the phone is bound to Trojan only, includ
 
 Caller is typically `voice-ai-improve-prompt` direct mode, or a GitLab CI-triggered mission task.
 
-1. Read the sidecar. Capture `llm_id`, `agent_id`, and the KB list. If the sidecar is missing, switch to **Sidecar recovery** intent first, then retry.
+1. Read the sidecar → `agent_id`, `llm_id`. If missing, run **Sidecar recovery** first, then retry.
 2. Read the current prompt file contents.
-3. `update_retell_llm` with `llm_id` + new `general_prompt`. Do not recreate the LLM. Do not touch the agent. Do not touch phone numbers.
-4. Update sidecar's `last_synced_at`. Commit the sidecar change:
-   ```bash
-   git add "<sidecar path>"
-   git commit -m "deploy(<prompt-slug>): resync prompt to Retell"
-   git push origin main
+3. Run the **5-step publish sequence** from the Retell agent versioning section above:
+   - `get_retell_llm(llm_id)` — capture `begin_message` (required on the next call).
+   - `update_retell_llm(llm_id, begin_message=<existing>, general_prompt=<new>)` — KBs unchanged, so do NOT pass `knowledge_base_ids`.
+   - `get_retell_llm(llm_id)` — capture the new draft LLM version number.
+   - `update_agent(agent_id, response_engine={type: "retell-llm", llm_id, version: <new llm version>}, version_description: "<sha> <title>")`.
+   - `POST /publish-agent/{agent_id}`.
+4. Sidecar does NOT need rewriting — `agent_id` and `llm_id` are unchanged, and no KBs changed. Skip the commit.
+5. Fire the webhook (if configured).
+6. Report:
    ```
-   If running in a CI-triggered context (detect via `$GITLAB_CI` env var or caller hint), skip the commit — CI will have its own opinion about whether to write back to the repo. Just surface the updated sidecar contents in the report.
-5. Report: `LLM <llm_id> redeployed. Sidecar last_synced_at: <iso>.`
+   LLM <llm_id> redeployed.
+   Agent <agent_id> published as v<N> "<sha> <title>"
+   Webhook: fired (HTTP 200)   | or: none configured | or: failed (...)
+   ```
 
 ---
 
@@ -240,68 +311,118 @@ Caller is typically `voice-ai-improve-prompt` direct mode, or a GitLab CI-trigge
 Caller said "resync KBs for X" or pointed at a `kb-*.txt` file directly.
 
 1. Resolve the sibling prompt file (same folder, matching `*-prompt.md` or `*-voice-agent-prompt.md`).
-2. Read the sidecar. If missing, switch to **Sidecar recovery** first.
-3. Build a diff:
-   - Local KB files in the folder vs sidecar's `knowledge_bases` list.
-   - New local file (no matching sidecar entry) → create KB, upload source, attach to LLM(s), add to sidecar.
-   - Existing match → upload new source via `add-knowledge-base-sources`, delete old source via `delete-knowledge-base-source`. Update `source_id` in sidecar.
-   - Sidecar entry with no local file → detach from LLM(s), delete source, delete KB, remove from sidecar.
-4. For each affected LLM (in Trojan mode, both), `update_retell_llm` with the current `knowledge_base_ids`.
-5. Update sidecar `last_synced_at`, commit (outside CI) as above.
-6. Report what was added/updated/removed.
+2. Read the sidecar. If missing, run **Sidecar recovery** first.
+3. Build a diff of local `kb-*.txt` files vs sidecar's `knowledge_bases[]`:
+   - **New local file, no sidecar entry** → `POST /create-knowledge-base` (multipart/form-data, file in `knowledge_base_files`) → append to sidecar.
+   - **Existing match (local file content changed)** → `GET /get-knowledge-base/{kb_id}` to read current sources → `POST /add-knowledge-base-sources/{kb_id}` (multipart) with the new file → `DELETE /delete-knowledge-base-source/{kb_id}/source/{old_source_id}`. Sidecar entry stays the same (we store KB ID, not source ID).
+   - **Sidecar entry with no local file** → detach the KB from the LLM via `update_retell_llm`, remove the entry from sidecar. Don't delete the KB entity in Retell automatically — log it as manual cleanup.
+4. Run the **5-step publish sequence** to redeploy:
+   - `get_retell_llm(llm_id)` — capture `begin_message`.
+   - `update_retell_llm(llm_id, begin_message=<existing>, general_prompt=<current prompt file contents>, knowledge_base_ids=<updated list>)`.
+   - `get_retell_llm(llm_id)` — capture new LLM version.
+   - `update_agent(agent_id, response_engine={type: "retell-llm", llm_id, version: <new>}, version_description: "<sha> <title>")`.
+   - `POST /publish-agent/{agent_id}`.
+   - In Trojan mode, run the LLM update + agent update + publish for BOTH agents (they share KBs, so the new `knowledge_base_ids` list applies to both LLMs).
+5. Write the updated sidecar (`knowledge_bases[]` changed). Commit:
+   ```bash
+   git add "<sidecar path>"
+   git commit -m "deploy(<prompt-slug>): resync KBs"
+   git push origin main
+   ```
+   In CI context (`$GITLAB_CI=true` or caller hint), skip the commit — surface the updated sidecar contents in the report instead.
+6. Fire the webhook.
+7. Report what was added / updated / detached, plus the new published version number.
 
 ---
 
 ## Intent: Full file sync
 
-Prompt AND KB files changed. Run the prompt-only update first, then the KB-only sync, in that order. Single commit at the end with both sidecar updates and a message like `deploy(<prompt-slug>): resync prompt + KBs`.
+Prompt AND KB files both changed. Do NOT run prompt update and KB sync as two separate publishes — batch them into a single 5-step sequence:
+
+1. KB diff + mutations first (create/add-source/delete-source as needed), accumulating the final `knowledge_base_ids` list.
+2. `get_retell_llm(llm_id)` — capture `begin_message`.
+3. `update_retell_llm(llm_id, begin_message=<existing>, general_prompt=<new prompt>, knowledge_base_ids=<final list>)` — one LLM update carrying both the new prompt AND the updated KB attachments.
+4. `get_retell_llm(llm_id)` — capture new LLM version.
+5. `update_agent(agent_id, response_engine={type: "retell-llm", llm_id, version: <new>}, version_description: "<sha> <title>")`.
+6. `POST /publish-agent/{agent_id}`.
+7. Write the updated sidecar (only `knowledge_bases[]` changed). Single commit: `deploy(<prompt-slug>): resync prompt + KBs`.
+8. Single webhook fire.
+
+Trojan mode: steps 2–6 run for both LLMs + both agents (they share KBs). One publish per agent, not per step.
 
 ---
 
 ## Intent: Agent param tweak
 
-Caller's instruction changes something on the agent (or LLM config), not the prompt or KBs.
+Caller's instruction changes something on the agent that ISN'T the prompt or KBs. The Retell API splits tweakable fields in two groups — know which mutation path applies:
 
-1. Resolve target: caller names a client → find sidecar → `agent_id` (or `llm_id` if the setting lives on the LLM).
+**Mutable in-place on `update_agent`** (confirmed via docs):
+- `voice_id` — "change voice to Jennifer Suarez"
+- `voice_model` — e.g. `eleven_turbo_v2_5`, `sonic-3`
+- `fallback_voice_ids` — provider-outage fallback list
+- `agent_name` — rename the agent
+- `language` — e.g. `en-US`, `es-ES`
+- `version_description` — the description slot (always set on every update)
+
+**NOT mutable on `update-retell-llm`** (requires LLM recreation):
+- `model` — to change from `gpt-4.1` to `gpt-5`, `claude-4.6-sonnet`, etc.
+- `model_temperature` — can only be set at LLM creation time
+
+If the caller asks for a `model` or `model_temperature` change, the flow is heavier: `create_retell_llm` with the new settings (copy `begin_message`, `general_prompt`, `knowledge_base_ids` from the old LLM) → `update_agent` to re-point `response_engine.llm_id` at the new LLM → publish → swap `llm_id` in the sidecar → commit. Then the old LLM is orphaned (manual cleanup). Worth explicitly confirming with the caller before taking this path.
+
+### Standard in-place tweak
+
+1. Resolve target: caller names a client → find sidecar → `agent_id`.
 2. Clarify ambiguities once, then act. Examples:
-   - "change voice to Jennifer Suarez" → `list_voices` → `update_agent` with new `voice_id`.
-   - "make the agent slightly warmer" → `update_retell_llm` with `model_temperature: 0.3` (ask if caller didn't specify a number; don't guess).
-   - "set language to Spanish" → `update_agent` with `language: "es-ES"`.
-3. Update the sidecar field that mirrors the changed attribute (e.g., sidecar's `voice.name` + `voice.voice_id`). If the attribute isn't in the sidecar schema, skip the sidecar write — schema is not a catch-all.
-4. Do NOT commit anything unless a sidecar field changed. No file edit happened.
-5. Report exactly what changed.
+   - "change voice to Jennifer Suarez" → `list_voices` → `update_agent(agent_id, voice_id: <voice_id>, version_description: "<sha> change voice to Jennifer Suarez")`.
+   - "set fallback voices for John Giordani" → `update_agent(agent_id, fallback_voice_ids: [...], version_description: "...")`.
+   - "set language to Spanish" → `update_agent(agent_id, language: "es-ES", version_description: "...")`.
+3. `POST /publish-agent/{agent_id}` to freeze the change as a new immutable version.
+4. **Do NOT update the sidecar.** It holds only the binding (agent_id, llm_id, KBs) — none of those change here.
+5. **Do NOT commit anything to git.** No file changed, no sidecar changed.
+6. Fire the webhook (if configured).
+7. Report exactly what changed in Retell + the new published version number.
 
-Never write this change to the prompt file. The prompt file is for prompt content; agent settings live only in Retell and (partially) the sidecar.
+Never write this change to the prompt file. The prompt file is for prompt content; agent settings live only in Retell.
 
 ---
 
 ## Intent: Sidecar recovery
 
-Caller says "rebuild sidecar for X" or any other intent failed because the sidecar is missing/corrupt.
+Caller says "rebuild sidecar for X" or any other intent tripped because the sidecar is missing/corrupt.
 
-1. Derive the agent name from the prompt filename (rules above).
-2. `list_agents` and match by name. If zero matches, stop — there's nothing to recover. If multiple, stop and show the caller the candidates.
-3. `get_agent` → capture `agent_id`, `response_engine.llm_id`, `voice_id`, `language`, etc.
-4. `get_retell_llm` → capture `model`, `model_temperature`, `knowledge_base_ids`.
-5. For each `knowledge_base_id`, query Retell (REST: `GET /get-knowledge-base/{id}`) → capture name and sources. Match sources back to local `kb-*.txt` files by basename where possible. If a source has no local counterpart, record it in the sidecar with `source_file: null` and flag it in the report.
-6. `list_phone_numbers` → find the one whose `inbound_agent_id` is this agent. Capture phone and area code. If none, sidecar's `phone_number` is null.
-7. Write sidecar per schema. `created_at` = best-effort (Retell `get_agent` may return `last_modification_timestamp` — use that). `last_synced_at` = now.
-8. Commit the new sidecar. Report what was recovered and flag anything ambiguous.
+1. Derive the agent name from the prompt filename.
+2. `list_agents` and match by name (case-insensitive). Zero matches → stop, nothing to recover. Multiple matches → stop and show candidates.
+3. `get_agent` → capture `agent_id`, `response_engine.llm_id`.
+4. `get_retell_llm(llm_id)` → capture `knowledge_base_ids`.
+5. For each `knowledge_base_id`, fetch the KB via REST (`GET /get-knowledge-base/{id}`) to read its name. Match back to local `kb-*.txt` files by the name convention (`<AGENT NAME> — <Topic>` ↔ `kb-<topic>.txt`, topic lowercased). If a KB has no local counterpart, record it with `source_file: null` and flag in the report.
+6. Write the 3-field sidecar:
+   ```json
+   {
+     "agent_id": "...",
+     "llm_id": "...",
+     "knowledge_bases": [ { "source_file": "kb-faqs.txt", "id": "kb_..." } ]
+   }
+   ```
+7. Commit (outside CI). Report what was recovered and flag anything ambiguous.
+
+No phone number lookup, no voice capture, no timestamp guessing. Those don't belong in the sidecar.
 
 ---
 
 ## Edge cases and failure handling
 
-- **Sidecar lookup returns an `agent_id` that no longer exists in Retell** → surface the broken link, ask caller whether to rebuild sidecar or recreate the agent. Never silently recreate.
+- **Sidecar's `agent_id` no longer exists in Retell** → surface the broken link, ask caller whether to rebuild sidecar (→ recovery intent) or recreate the agent (→ full deploy). Never silently recreate.
 - **Prompt file path doesn't exist** → stop. Don't run any Retell calls blind.
-- **Derived name collides with an unrelated live agent** → refuse with the conflicting `agent_id`.
+- **Derived name collides with an unrelated live agent** on first-time deploy → refuse with the conflicting `agent_id`.
 - **KB REST endpoint shape changed** → re-query Context7 before retrying. Don't hammer the API with guessed payloads.
 - **No phone number available in requested area code** → surface Retell's error, ask for alternate area code.
 - **Caller mixes a file sync and a param tweak in one ask** → do the file sync, report it, then ask explicitly whether to also apply the param tweak.
-- **Running in CI context** (env var `GITLAB_CI=true`, or caller hint in the handoff message) → do every Retell operation, update the sidecar in memory, but **skip the sidecar git commit**. Instead, print the updated sidecar contents at the end of the report. Whether to write back to the repo from CI is decided upstream of this skill.
-- **Running in CI and the sidecar is stale** → do sidecar recovery in-memory, perform the Retell update against recovered state, report the recovered + updated sidecar. Don't commit it from CI.
+- **Running in CI context** (env var `GITLAB_CI=true`, or caller hint in the handoff message) → do every Retell operation, but **skip the sidecar git commit**. Print the updated sidecar contents at the end of the report instead. Whether CI writes back to the repo is decided upstream.
 - **File says prompt is for a Trojan pair but only one sidecar exists** → deploy or update only the one that matches the caller's intent. Don't improvise the other.
 - **User asks to delete an agent/LLM/KB/number** → refuse. This skill is for create + update only. Deletion is manual.
+- **Webhook fails** → log the HTTP status (or connection error), continue. Never retry. Never fail the deploy.
+- **Retell version publish fails but the LLM/KB update succeeded** → log the missing version entry prominently, continue. The agent is live; the audit trail is the only thing missing.
 
 ---
 
@@ -313,3 +434,4 @@ Caller says "rebuild sidecar for X" or any other intent failed because the sidec
 - Deleting any Retell resources.
 - Managing GitLab MRs, running `glab`, opening pull requests.
 - Writing `.gitlab-ci.yml` or any CI config.
+- Sending SMS, Slack messages, or any specific notification directly — fire a webhook, let downstream automation do the notification.
