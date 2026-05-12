@@ -135,6 +135,7 @@ Your work is composed from three distinct skills that do one thing each. Never c
 | `voice-ai-prototype` | Drafts prompt + KB files, commits them. No Retell. |
 | `voice-ai-improve-prompt` | Edits prompt + KB files, commits them (or opens MR). No Retell. |
 | `voice-ai-deploy-retell` | All Retell API work — creates/updates LLMs, KBs, agents, phones. Writes sidecar. |
+| `voice-ai-test-cases` | Create / update / delete / list Retell test case definitions. Pure executor — the brainstorm conversation lives here in voice-ai-head (Path 3). |
 
 The three canonical paths below describe when to chain them.
 
@@ -168,6 +169,60 @@ Steps:
 1. Invoke `voice-ai-improve-prompt --with-pr` (or `voice-ai-improve-prompt` with an MR reference for review mode). The skill pushes to a per-prompt branch and opens (or extends) the MR.
 2. **Do NOT invoke `voice-ai-deploy-retell`.** Retell sync happens automatically when the MR merges — the `ai_prompts` repo has a GitLab CI `deploy-retell` job that POSTs a mission task to Claude Claw's dashboard API, which queues a new run of `voice-ai-deploy-retell` on your agent. You will see the mission task appear in your queue ~60 seconds after the merge; Claude Code will pick it up and run the deploy skill then.
 3. Report back: branch name, MR URL, and a note that Retell will auto-sync on merge.
+
+### Path 3: Build/manage Retell test cases
+
+Trigger phrases: "create test cases for X", "build a test for X", "build simulations for X", "add a Retell test for X", "list test cases for X", "show me the tests on X", "update the test <name> on X", "delete the <name> test on X".
+
+This path is the most conversational of the three — most of the work happens in chat with Ben BEFORE the skill is invoked. The skill itself is a pure executor. The brainstorm lives here.
+
+Steps:
+
+1. **Hydrate full agent context yourself, in chat, before proposing anything.** Read in parallel:
+   - The prompt file from `ai_prompts/<path>` and any sibling `kb-*.txt`
+   - The sidecar `<prompt>.retell.json` → `agent_id`, `llm_id`
+   - `get_agent(agent_id)` on the path-pinned Retell MCP → current draft state (voice, language, post-call config)
+   - `get_retell_llm(llm_id)` → current `general_prompt`, `general_tools` (custom functions with their HTTP methods if declared in any prior deploy plan), `knowledge_base_ids`
+   - `list_test_case_definitions(type=retell-llm, llm_id=<llm_id>)` → existing tests on this LLM, so you don't propose duplicates and so Ben can see what already covers what
+   - Run the same prompt-grammar parse as the deploy skill — extract built-in function calls, custom function calls, store statements (mid-call vs post-call), `{{variable}}` references
+
+2. **Read both canonical references** before opening your mouth:
+   - [../../.claude/voice-ai-shared/references/test-case-style.md](../../.claude/voice-ai-shared/references/test-case-style.md) — writing-style rules (Identity/Goal/Personality block, tilde stage directions, metrics phrasing, the 10 strategic buckets, the `extract_dynamic_variable` judgment rule, the fuzzy/lookup consolidation pattern).
+   - [../../.claude/skills/voice-ai-test-cases/SKILL.md](../../.claude/skills/voice-ai-test-cases/SKILL.md) — the op grammar this skill expects as input.
+
+3. **Open the conversation tersely.** Tell Ben what you've hydrated and ask what behaviors he wants to test. Don't auto-propose. Example:
+
+   > Hydrated. `JOHN GIORDANI VOICE AGENT` on slug `voci-partners`.
+   > LLM `llm_xyz...`, 14 existing tests.
+   > Custom functions in prompt grammar: `book_appointment` (POST), `check_availability` (GET).
+   > What behaviors do you want to test?
+
+   That's it. No autopilot drafting. Wait for Ben.
+
+4. **Conservative, conversational loop.** Ben names a behavior. You:
+   - Classify it into one of the 10 buckets from test-case-style.md.
+   - Check existing tests — is something close already covering it? If yes, mention it, ask if he wants an update or a new test.
+   - Draft ONE test (or ONE consolidated test for the fuzzy/lookup bucket — never multiple in that bucket) following the style guide faithfully. Name in `"Persona Name - Scenario Brief"` format, user_prompt with the Identity/Goal/Personality structure (or turn-by-turn for non-persona), metrics as short observable-behavior bullets, mocks per the default policy.
+   - Show it in chat for review. Ben edits / approves / drops.
+   - Loop until Ben has 5-12 tests he's happy with (or fewer if that's all he wants).
+
+5. **Tool-mock policy (codified — apply automatically):**
+
+   | Function pattern | Default mock |
+   |---|---|
+   | Built-in `end_call` | No mock |
+   | Built-in `transfer_call` / `agent_transfer` | `{type: "transfer_call", input_match_rule: {type: "any"}, output: "Successfully transferred the call", result: true}` |
+   | Built-in `press_digit` | `{input_match_rule: {type: "any"}, output: "Successfully pressed"}` |
+   | Built-in `extract_dynamic_variable` | **Do NOT mock by default.** Mock only when the test verifies downstream-of-extraction behavior, not the extraction itself. See test-case-style.md's judgment rule. |
+   | Custom POST/PUT/PATCH/DELETE | `{input_match_rule: {type: "any"}, output: "Successfully completed the task"}` |
+   | Custom GET | Ask Ben per test what literal data the lookup should return. |
+   | Custom function with no declared method | Default to POST-like; flag for Ben to confirm |
+
+   Use `partial_match` (not `any`) when the test needs to verify the agent called a function with specific args (most common for fuzzy lookup consolidation).
+
+6. **When Ben gives the go signal** (per the brainstorm-first rules at the top of this file): invoke `voice-ai-test-cases` with the agreed test ops in a fenced YAML block under `Test case operations:`. The skill validates, account-pins, executes against the Retell API, and reports. You report back to Ben with the skill's output.
+
+Do NOT call `create_test_case_definition`, `update_test_case_definition`, `delete_test_case_definition`, or `list_test_case_definitions` directly via MCP or REST. The skill owns that surface. The only Retell calls you make directly from this Path are the hydration reads (`get_agent`, `get_retell_llm`, `list_test_case_definitions`) — and `list_test_case_definitions` could also be invoked via the skill's `op: list` form when Ben asks "show me the tests on X".
 
 ### Standalone deploy-retell invocations
 
