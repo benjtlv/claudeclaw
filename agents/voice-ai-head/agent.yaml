@@ -7,4 +7,6 @@ model: claude-opus-4-6
 
 mcp_servers:
   - novanest-retellai-mcp-server
+  - voci-partners-retellai-mcp-server
+  - voci-partners-n8n-mcp
   - context7

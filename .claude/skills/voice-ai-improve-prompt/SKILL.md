@@ -1,6 +1,6 @@
 ---
 name: voice-ai-improve-prompt
-description: Iterate on a voice AI agent prompt in the novanest-ai/ai_prompts GitLab repo. This skill only touches files (prompt and KB) and git — it does NOT push changes into Retell. **Direct mode** (default): commit straight to main and push; the caller then invokes `voice-ai-deploy-retell` to sync Retell. **`--with-pr` mode**: commit to a per-prompt branch and open or extend a merge request; Retell is synced by a GitLab CI job after merge, no local deploy needed. **Review mode**: when the user points at an open MR and asks to apply its unresolved inline comments, the skill fetches each comment, applies the edit, commits, pushes, replies "done", and resolves the discussion — still no Retell changes. Use this skill whenever the user wants to improve, iterate on, edit, or revise a voice AI prompt — phrasings like "update the prompt for <client>", "improve John Giordani's prompt", "push prompt changes", "iterate on the voice agent prompt", "apply the unresolved comments on MR !42", "pull feedback from <MR url>", "review mode on <MR>", or any request that implies editing a prompt under CLIENTS/DEMOS/PROSPECTS/INTERNAL. Only take the `--with-pr` path when the user explicitly asks for a PR, MR, or merge request; review mode triggers when the user references an MR and asks for its comments to be applied. Otherwise default to direct mode. Prefer this skill over plain git/glab commands for any voice-AI-prompt iteration.
+description: Iterate on a voice AI agent prompt in the novanest-ai/ai_prompts GitLab repo. This skill only touches files (prompt, KB, deploy plan) and git — it does NOT push changes into Retell. **Direct mode** (default): commit straight to main and push; the caller then invokes `voice-ai-deploy-retell` with any Retell-side ops from the conversation passed inline. **`--with-pr` mode**: commit to a per-prompt branch and open or extend a merge request; also writes a `_deploy-plan.md` capturing every Retell-side change the conversation agreed on (custom function add/update, voice swap, N8N workflow create, etc.) so it travels with the MR and gets executed by CI post-merge. **Review mode**: when the user points at an open MR and asks to apply its unresolved inline comments, the skill fetches each comment, applies the edit (prompt OR plan, whichever the comment targets), commits, pushes, replies "done", and resolves the discussion. Use this skill whenever the user wants to improve, iterate on, edit, or revise a voice AI prompt — phrasings like "update the prompt for <client>", "improve John Giordani's prompt", "push prompt changes", "iterate on the voice agent prompt", "apply the unresolved comments on MR !42", "pull feedback from <MR url>", "review mode on <MR>", or any request that implies editing a prompt under CLIENTS/DEMOS/PROSPECTS/INTERNAL. Only take the `--with-pr` path when the user explicitly asks for a PR, MR, or merge request; review mode triggers when the user references an MR and asks for its comments to be applied. Otherwise default to direct mode. Prefer this skill over plain git/glab commands for any voice-AI-prompt iteration.
 ---
 
 # Voice AI — Improve Prompt
@@ -11,17 +11,20 @@ Takes a user instruction describing how to improve a voice AI prompt, and in a s
 
 1. Resolves the target prompt file inside the `ai_prompts` repo.
 2. Applies the requested improvement (and, if relevant, splits knowledge-base content into sibling `kb-*.txt` files — see Step B2).
-3. Ships the change via one of three modes, **all of which are files-only**. Retell updates happen outside this skill — either by the caller invoking `voice-ai-deploy-retell` after direct mode returns, or automatically via GitLab CI after a `--with-pr` MR merges.
-   - **Default (direct mode)**: commit to `main`, push, done. Caller is expected to chain into `voice-ai-deploy-retell` next.
-   - **`--with-pr` mode**: commit to a per-prompt branch, push, and open (or extend) a merge request against `main`. Retell sync happens automatically on merge via GitLab CI — no manual deploy step needed.
-   - **Review mode**: the instructions come from an MR's unresolved inline comments instead of from chat. The skill fetches the comments, applies them, commits + pushes to the MR branch, and replies + resolves each comment. Retell sync still happens on merge via CI.
+3. In `--with-pr` mode only: drafts/updates a sibling `_deploy-plan.md` capturing every Retell-side change the conversation agreed on (Step B3). The plan is the persistence layer that carries the conversation's Retell intent across the merge gap to CI.
+4. Ships the change via one of three modes, **all of which are files-only**. Retell updates happen outside this skill — either by the caller invoking `voice-ai-deploy-retell` with inline ops after direct mode returns, or automatically via GitLab CI after a `--with-pr` MR merges (CI hands the plan file to the deploy skill).
+   - **Default (direct mode)**: commit to `main`, push, done. No plan file written — the chat agent that invoked this skill holds the conversation's Retell-side asks in working memory and passes them as inline ops to `voice-ai-deploy-retell` in the next tool call.
+   - **`--with-pr` mode**: commit to a per-prompt branch (prompt + KB + deploy plan), push, and open (or extend) a merge request against `main`. Retell sync happens automatically on merge via GitLab CI, executing the plan's ops + the prompt update — no manual deploy step needed.
+   - **Review mode**: the instructions come from an MR's unresolved inline comments instead of from chat. The skill fetches the comments, applies each (to the prompt OR to the plan, depending on what the comment targets), commits + pushes to the MR branch, and replies + resolves each comment. Retell sync still happens on merge via CI.
 
-The design assumption for direct and `--with-pr` modes is that the user provides **everything at once** — client/category, which prompt file, and what to change. For review mode, the user just provides the MR reference and the comments carry the instructions. If anything is ambiguous, clarify before touching the repo.
+The design assumption for direct and `--with-pr` modes is that the user provides **everything at once** — client/category, which prompt file, what to change in the prompt, AND any Retell-side changes that should land together (custom function tweaks, voice swap, N8N workflow). For review mode, the user just provides the MR reference and the comments carry the instructions. If anything is ambiguous, clarify before touching the repo.
+
+The deploy plan schema and the inline ops grammar are both defined in [../../voice-ai-shared/references/deploy-plan-format.md](../../voice-ai-shared/references/deploy-plan-format.md). Always read it before drafting a plan or writing inline ops — the op catalog lives there.
 
 ## Choosing the mode
 
-- **Default to direct mode.** If the user just says "improve the prompt for X" / "update John Giordani's prompt" / "add a rebuttal to the pricing section", ship straight to `main`. The caller's orchestration (voice-ai-head CLAUDE.md) will invoke `voice-ai-deploy-retell` after this skill returns.
-- **Use `--with-pr` when the user explicitly asks for it** — phrases like "with a PR", "open a merge request", "don't push to main", "review first", "--with-pr". If there's any doubt, default to direct mode; the user knows to ask for a PR when they want one.
+- **Default to direct mode.** If the user just says "improve the prompt for X" / "update John Giordani's prompt" / "add a rebuttal to the pricing section", ship straight to `main`. The caller's orchestration (voice-ai-head CLAUDE.md) will invoke `voice-ai-deploy-retell` after this skill returns, passing any Retell-side ops from the conversation as inline ops.
+- **Use `--with-pr` when the user explicitly asks for it** — phrases like "with a PR", "open a merge request", "don't push to main", "review first", "--with-pr". If there's any doubt, default to direct mode; the user knows to ask for a PR when they want one. In `--with-pr` mode, the conversation's Retell-side asks are persisted to `_deploy-plan.md` so they survive the merge gap.
 - **Use review mode when the user points at an open MR and asks to apply its comments** — phrases like "apply the unresolved comments on MR !42", "pull feedback from <MR url>", "review mode on <MR>", "apply the comments". Trigger is unambiguous — there's an MR reference and an ask to consume its comments as instructions. Skip if the user is just asking about the MR without asking to act on comments.
 
 ## Repo facts (do not re-derive)
@@ -42,7 +45,7 @@ Before doing anything, make sure you have:
 1. **Category** — usually `CLIENTS` or `PROSPECTS`, occasionally `DEMOS` or `INTERNAL`. If the user didn't say, ask. Don't guess.
 2. **Client/folder name** — the user will usually give it in mixed case (e.g., "John Giordani"). Match case-insensitively against the actual directory names.
 3. **Prompt filename** — which file to edit inside that folder. If the folder has multiple candidates and the user didn't specify, list the files and ask which one.
-4. **Improvement instruction** — what to change and why.
+4. **Improvement instruction** — what to change and why. Note: this can include Retell-side asks beyond the prompt text itself (custom function tweaks, voice/model/language changes, N8N workflow asks). Those don't go into the prompt file — they go into inline ops (direct mode) or `_deploy-plan.md` (`--with-pr` mode).
 
 ### When to clarify vs. proceed
 
@@ -80,7 +83,7 @@ Before editing, classify the improvement and read the matching reference(s) from
 | Improvement involves | Read first |
 |---|---|
 | Speech examples, filler words, tone, response length, language to avoid, AI over-reaction calibration, never-restate / never-recap rules, pronunciation rules (prices, times, emails, URLs, brand names) | [../../voice-ai-shared/references/speech-patterns.md](../../voice-ai-shared/references/speech-patterns.md) |
-| Retell platform syntax — `--` pause marker, `NO_RESPONSE_NEEDED`, `{{variable}}` injection, `~text~` developer instructions, `~call function~` invocations. Also: agent verbalising "dash dash" or talking over caller after a question | [../../voice-ai-shared/references/retell-conventions.md](../../voice-ai-shared/references/retell-conventions.md) |
+| Retell platform syntax — `--` pause marker, `NO_RESPONSE_NEEDED`, `{{variable}}` injection, `~text~` developer instructions, `~call the function 'NAME'~` invocations (5 built-ins auto-wired, custom = manual), `~store 'x' in 'var'~` extraction grammar (post-call default; mid-call when nested in `extract_dynamic_variable`). Also: agent verbalising "dash dash" or talking over caller after a question. NOTE: if you find old-grammar patterns in a prompt you're editing (`~call end_call~`, `~Store in 'X' variable~`, `~End call~`, `~Set 'X' = 'Y'~`), fix them in the same edit — these no longer match what the deploy skill parses. | [../../voice-ai-shared/references/retell-conventions.md](../../voice-ai-shared/references/retell-conventions.md) |
 | Qualification gates, IF/ONLY IF logic, transfer authorization, info-collection structure, variables | [../../voice-ai-shared/references/qualification-framework.md](../../voice-ai-shared/references/qualification-framework.md) |
 | Booking flow, calendar functions, AM/PM rules, no-show prevention | [../../voice-ai-shared/references/appointment-setting.md](../../voice-ai-shared/references/appointment-setting.md) |
 | Editing a Trojan prompt (filename ends `-trojan.md`): segue, missed-calls math, frame-flip, deploy-tonight, sales-side objections | [../../voice-ai-shared/references/trojan-horse.md](../../voice-ai-shared/references/trojan-horse.md) and [../../voice-ai-shared/assets/voice-agent-template-trojan-overlay.md](../../voice-ai-shared/assets/voice-agent-template-trojan-overlay.md) |
@@ -118,6 +121,23 @@ Order of operations: Step A → Step B0 → Step B → Step B2 → Step C → St
 
 Retell is NOT updated by this skill. The caller (voice-ai-head CLAUDE.md orchestration) is expected to invoke `voice-ai-deploy-retell` after this skill returns, pointing it at the edited prompt file. That's the seam between file work and deploy work — keep them separate.
 
+**Inline ops handoff:** if the conversation that triggered this run included any Retell-side asks beyond the prompt text (voice swap, custom function add/update, model change, N8N workflow create, etc.), the caller MUST pass those as inline ops in the invocation prompt to `voice-ai-deploy-retell` after this skill returns. Direct mode does NOT write a `_deploy-plan.md` — the conversation IS the plan, and the caller holds it in working memory until the deploy call. The inline ops grammar is the same YAML format defined in [../../voice-ai-shared/references/deploy-plan-format.md](../../voice-ai-shared/references/deploy-plan-format.md); just embed it under a `Retell operations:` heading in the deploy skill's invocation prompt.
+
+Example handoff message from caller to `voice-ai-deploy-retell`:
+
+````
+Deploy CLIENTS/JOHN GIORDANI/john-giordani-voice-agent-prompt.md.
+
+Retell operations:
+
+```yaml
+- op: set_voice
+  voice_name: "Jennifer Suarez"
+```
+````
+
+If the conversation only changed the prompt text, no inline ops block is needed — the deploy skill's grammar parse handles built-in functions and mid/post-call extractions on its own.
+
 ### Step C — Commit and push to main
 
 Stage the prompt file plus any `kb-*.txt` files you touched in Step B2:
@@ -144,7 +164,9 @@ Next step (not run by this skill):
 
 ## `--with-pr` mode: branch + merge request
 
-Order of operations: Step A → Step C' → Step B0 → Step B → Step B2 → Step D' → Step E'.
+Order of operations: Step A → Step C' → Step B0 → Step B → Step B2 → **Step B3 (deploy plan)** → Step D' → Step E' → Step F'.
+
+The new step (B3) is the load-bearing piece. Without it, Retell-side asks from the conversation evaporate at MR-open time and never make it to the post-merge deploy. The plan file is the persistence layer.
 
 ### Step C' — Ensure the branch exists and is checked out
 
@@ -167,21 +189,112 @@ git ls-remote --exit-code --heads origin <branch-name>
 
 Do not delete or force-recreate branches. The user manages branch/MR lifecycle manually in GitLab after merge.
 
+### Step B3 — Draft or update the deploy plan
+
+This step runs AFTER Step B / B2 (prompt + KB edits applied locally on the feature branch) and BEFORE Step D' (commit).
+
+Read [../../voice-ai-shared/references/deploy-plan-format.md](../../voice-ai-shared/references/deploy-plan-format.md) before writing any plan content. The full op catalog, required/optional fields per op, validation rules, and lifecycle live there. Don't invent op types or fields not in the catalog.
+
+The plan path is `_deploy-plan.md` in the same folder as the prompt file (or `_deploy-plan-trojan.md` next to a Trojan prompt). One plan per prompt file.
+
+#### B3.1 — Enumerate Retell-side asks from the conversation
+
+Scan the full user instruction for THIS run (and any prior turns in this session that the user said belong to this iteration). Bucket each ask:
+
+- **Prompt-text changes** → already handled in Step B, do nothing here.
+- **KB content changes** → already handled in Step B2, do nothing here.
+- **Built-in function additions** (the 5: `end_call`, `transfer_call`, `agent_transfer`, `press_digit`, `extract_dynamic_variable`) → handled by the deploy skill's grammar parse via the prompt text alone, do nothing here.
+- **Mid-call extractions** (new `~store ... in ...~` inside `extract_dynamic_variable`) → handled by grammar parse, do nothing.
+- **Post-call extractions** (new bare `~store ... in ...~`) → handled by grammar parse, do nothing.
+- **Everything else** → goes into the plan as ops. This includes:
+  - Custom function add / update / delete (anything beyond the 5 built-ins)
+  - Voice / voice model / language / model / temperature changes
+  - N8N workflow create / update tied to a custom function
+  - Notes the human reviewer or future-you should see
+
+For each Retell-side ask in the "everything else" bucket, map to the op catalog in `deploy-plan-format.md`. If a request doesn't fit any cataloged op, stop and ask the user to clarify — don't invent grammar.
+
+#### B3.2 — Read existing plan, if any
+
+```bash
+test -f "<plan path>" && cat "<plan path>"
+```
+
+- **No file exists** (first iteration of this MR) → you'll write a fresh plan in B3.4.
+- **File exists** → parse the frontmatter and the YAML ops block. You'll merge new ops in B3.3.
+
+#### B3.3 — Merge new ops into existing plan (second+ iteration only)
+
+For each new op from B3.1:
+
+- **Same op-type, same target** as an existing entry (e.g. two `set_voice`, or two `update_custom_function name: book_appointment`) → replace the existing entry with the new one. Don't stack.
+- **Different op-type or different target** → append to the end of the YAML list.
+- **An existing op that the user is now reversing** ("actually keep the original voice") → remove the entry entirely; don't add a no-op.
+
+If `status: applied` in the existing frontmatter, reset it to `pending` and clear `last_applied_sha` to `null` — the new commit makes this a fresh apply target.
+
+Update the `## Summary` section to reflect the cumulative state of the MR, not just the latest iteration. Reviewers reading the MR description should see what the full set of changes is, not a chronological diff.
+
+#### B3.4 — Show the user the plan and confirm
+
+Print the proposed plan (frontmatter + Summary + ops block + any Notes/Open questions) in chat. If it's a fresh plan, show the full thing. If it's an update to an existing plan, show what's changing (added ops, modified ops, removed ops) plus the new full ops list.
+
+Ask explicitly: "Plan looks like this — commit it as-is, change anything, or skip [the plan and just ship the prompt edit]?"
+
+Three possible responses:
+
+- **Commit as-is** → proceed to B3.5.
+- **Change X** → apply the change in chat (edit a specific op, drop something, add a note), re-display, re-confirm. Don't proceed without explicit go.
+- **Skip the plan** → only valid if there were ZERO non-prompt-text Retell-side asks (i.e., this is a pure prompt edit with nothing to plan for). If there are real ops in the list and the user says skip, push back: skipping the plan means those ops won't happen on merge.
+
+This confirmation step is the conversation-becomes-contract moment. Don't shortcut it. The user agreeing to the plan in chat is what makes the plan-as-MR-description an honest artifact.
+
+#### B3.5 — Write the plan file
+
+Write `_deploy-plan.md` (or `_deploy-plan-trojan.md`) with the agreed-on contents. Format per `deploy-plan-format.md` — frontmatter (`prompt`, `status: pending`, `last_applied_sha: null`), `## Summary`, `## Retell operations` (fenced YAML), optional `## Notes` and `## Open questions`.
+
+If the only changes in this iteration were prompt-text / KB / built-in-grammar (nothing for the plan to capture) AND no plan file exists yet → skip writing a plan entirely. The deploy skill's grammar parse handles everything in this case.
+
+If a plan file already exists from a prior iteration of this MR AND this iteration has no new ops AND no removals → leave the plan file untouched. The existing ops are still pending and will be executed on merge.
+
 ### Step D' — Commit and push to the feature branch
 
 ```bash
-git add "<prompt-file-path>" "<any kb-*.txt paths you touched>"
+git add "<prompt-file-path>" "<any kb-*.txt paths you touched>" "<plan path if written or updated in B3>"
 git commit -m "improve(<prompt-slug>): <one-line summary of the change>"
 git push -u origin <branch-name>
 ```
 
-### Step E' — Open an MR if none is open
+### Step E' — Open an MR if none is open (or update its description if one is)
 
 ```bash
 glab mr list --source-branch <branch-name> --state opened --output json
 ```
 
-- **Non-empty result** → an MR is already open. Print its URL and stop. Do not open a second MR.
+**Description body** — the MR description IS the deploy plan, so reviewers see the full intent directly in GitLab without opening the file. Construct it as:
+
+```
+<plan ## Summary section, verbatim>
+
+## Retell operations after merge
+
+<plan ## Retell operations YAML block, verbatim — including the ```yaml fence>
+
+<plan ## Notes section if present>
+
+---
+Plan file: _deploy-plan.md (or _deploy-plan-trojan.md) — single source of truth.
+This MR description is regenerated from it on every iteration.
+```
+
+If Step B3 was skipped (pure prompt edit, no plan written) → description body is the user's improvement instruction verbatim (today's behavior).
+
+- **Non-empty result** → an MR is already open. Update its description to match the latest plan, then print its URL and stop:
+  ```bash
+  glab mr update <mr_iid> --description "<new description body>"
+  ```
+  Do not open a second MR. Do not touch title or labels.
+
 - **Empty result** → open one:
 
 ```bash
@@ -189,7 +302,7 @@ glab mr create \
   --source-branch <branch-name> \
   --target-branch main \
   --title "improve(<prompt-slug>): <one-line summary>" \
-  --description "<user's improvement instruction, verbatim>" \
+  --description "<description body as constructed above>" \
   --remove-source-branch \
   --yes
 ```
@@ -197,23 +310,36 @@ glab mr create \
 ### Step F' — Report back (`--with-pr` mode)
 
 ```
-Edited: CLIENTS/JOHN GIORDANI/prompt.md
-Branch: john-giordani-prompt (pushed)
-MR:     https://gitlab.com/novanest-ai/ai_prompts/-/merge_requests/123
+Edited:    CLIENTS/JOHN GIORDANI/prompt.md
+KBs:       (any kb-*.txt touched, or "none")
+Plan:      _deploy-plan.md (3 ops: set_voice, update_custom_function, create_n8n_workflow)
+           — or: "not written (no Retell-side asks beyond prompt grammar)"
+Branch:    john-giordani-prompt (pushed)
+MR:        https://gitlab.com/novanest-ai/ai_prompts/-/merge_requests/123
+           — description regenerated from plan
 
-Retell: not synced from this skill. GitLab CI will auto-deploy
-        via voice-ai-deploy-retell when the MR merges to main.
+Retell: not synced from this skill. GitLab CI will auto-deploy via
+        voice-ai-deploy-retell when the MR merges to main, executing the
+        plan's ops + the prompt update in one publish.
 ```
 
-If the MR already existed, say "MR already open" instead of creating a new one.
+If the MR already existed, say "MR already open (description updated to match latest plan)" instead of creating a new one.
 
-Do **not** update the Retell LLM in this mode. The redeploy happens automatically via the `.gitlab-ci.yml` `deploy-retell` job after the MR is merged — the job POSTs a mission task to Claude Claw's dashboard API which invokes `voice-ai-deploy-retell` on the voice-ai-head agent. If CI fails, Ben will see it in GitLab and can manually run `voice-ai-deploy-retell` to recover.
+Do **not** update the Retell LLM in this mode. The redeploy happens automatically via the `.gitlab-ci.yml` `deploy-retell` job after the MR is merged — the job POSTs a mission task to Claude Claw's dashboard API which invokes `voice-ai-deploy-retell` on the voice-ai-head agent, handing it both the prompt path AND the plan path. If CI fails, Ben will see it in GitLab and can manually run `voice-ai-deploy-retell` to recover (the plan file is the recovery contract — re-running the deploy skill picks up exactly where CI left off).
 
 ## Review mode: apply unresolved MR comments
 
 Use this mode when the user references an open MR and asks for its unresolved inline comments to be applied as edits. The comments carry the instructions — you don't need separate free-text guidance from the user.
 
-Order of operations: Step A → Step C'' → Step R1 → Step R2 → [per comment: Step B0 → Step B → Step B2] → Step D' → Step R3 → Step F''.
+Order of operations: Step A → Step C'' → Step R1 → Step R2 → [per comment: Step B0 → Step B → Step B2 → (Step B3 if comment is plan-related)] → Step D' → Step R3 → Step F''.
+
+Comments can target three kinds of files:
+
+- The prompt `.md` file (most common) → handled by Step B's surgical edit.
+- A `kb-*.txt` file (less common) → handled by Step B2's KB update flow.
+- The `_deploy-plan.md` file (new) → handled by Step B3's plan merge flow. Comment on a plan line ("change voice to Jennifer instead") or a general MR comment that says "also swap the language to es-ES" both fall here; treat the comment text as if it were a fresh Retell-side ask from the conversation, run it through B3.1's catalog mapping, and update the plan accordingly.
+
+The `position.new_path` field on the comment tells you which file — match it to the prompt path, a KB path, or the plan path and route to the right substep.
 
 ### Step C'' — Resolve MR and check out its source branch
 
@@ -274,21 +400,43 @@ Wait for go/no-go. If the user wants to skip any, respect that list. If they wan
 
 ### Per-comment edit loop
 
-For each comment you're applying:
+For each comment you're applying, first determine the target file from `position.new_path`:
 
-1. **Classify** via Step B0 lookup — if the comment is about speech/tone, consult `speech-patterns.md`; if about qualification, `qualification-framework.md`; about a KB file, `faq-format.md` and `knowledge-base-split.md`; etc. Same rules as a normal `--with-pr` run.
-2. **Apply the edit** per Step B — use the comment's line number to locate the anchor; prefer surgical `Edit` over rewrites. If the line has shifted due to prior commits on the branch, search for the surrounding context in the current file.
-3. **If the comment touches KB content**, apply Step B2 mechanics (FAQ format, no duplication, update `## Knowledge Base` pointer).
-4. **If you can't apply a comment cleanly** (truly ambiguous, conflicts with another comment, asks for something that requires your judgment), skip it and note why — you'll leave that discussion unresolved and reply with what you saw.
+- Path ends in the prompt `.md` filename → **prompt edit**.
+- Path ends in `kb-*.txt` → **KB edit**.
+- Path ends in `_deploy-plan.md` or `_deploy-plan-trojan.md` → **plan edit**.
+- General (non-inline) MR comment with no `position.new_path` → if the body unambiguously names a Retell-side change ("swap voice to Jennifer", "drop the email parameter from book_appointment"), treat as a **plan edit**; otherwise surface to the user at the end as a general comment.
+
+Then, per target:
+
+**Prompt edit:**
+1. **Classify** via Step B0 lookup — if the comment is about speech/tone, consult `speech-patterns.md`; if about qualification, `qualification-framework.md`; etc.
+2. **Apply the edit** per Step B — use the comment's line number to locate the anchor; prefer surgical `Edit` over rewrites. If the line has shifted due to prior commits on the branch, search for the surrounding context.
+
+**KB edit:**
+1. Apply Step B2 mechanics (FAQ format, no duplication, update `## Knowledge Base` pointer).
+
+**Plan edit:**
+1. Run the comment body through Step B3.1's bucket: it should map to a cataloged op (or be a notes/summary tweak).
+2. Apply via Step B3.3's merge rules — if the comment changes an existing op, replace; if it adds, append; if it removes, drop the entry.
+3. If the comment names something that doesn't fit any op in the catalog, treat as unapplicable (see below).
+
+**If you can't apply a comment cleanly** (truly ambiguous, conflicts with another comment, asks for something the catalog doesn't cover yet) → skip it, leave the discussion unresolved, and reply with what you interpreted and why you skipped. Don't invent ops on the fly.
 
 ### Step D' — Commit and push (same as `--with-pr` mode)
 
-One commit for all applied comments. Stage the prompt file plus any `kb-*.txt` files you touched:
+One commit for all applied comments. Stage the prompt file plus any `kb-*.txt` files plus the plan file if it changed:
 
 ```bash
-git add "<prompt-file-path>" "<any kb-*.txt paths you touched>"
+git add "<prompt-file-path>" "<any kb-*.txt paths you touched>" "<plan path if touched>"
 git commit -m "improve(<prompt-slug>): apply MR !<iid> review comments"
 git push origin <source_branch>
+```
+
+If a plan comment was applied, also update the MR description body so it still mirrors the plan (same construction as Step E' of the `--with-pr` mode):
+
+```bash
+glab mr update <iid> --description "<regenerated body>"
 ```
 
 The commit appears in the MR thread automatically — no second MR, no second branch.
@@ -349,7 +497,7 @@ If there were general (non-inline) MR comments, list them here so the user can a
 
 - Creating new clients or new prompt files from scratch — use `voice-ai-prototype` for that.
 - First-time creation of an agent (prompt + Retell deploy) — use `voice-ai-prototype` then `voice-ai-deploy-retell`.
-- Any Retell-side change (LLM update, KB sync, voice swap, agent params) — use `voice-ai-deploy-retell`. This skill never calls the Retell API.
+- **Actually executing Retell-side changes.** This skill writes a deploy plan describing them (or hands them off inline in direct mode), but never calls the Retell API itself. Execution is `voice-ai-deploy-retell`'s job.
 - Managing branch/MR lifecycle post-merge — the user handles that in the GitLab UI.
 - Human-side MR review (judging whether to approve/merge). Review mode *applies* the user's already-written review comments as edits; it doesn't decide whether the prompt is good.
 - Merging MRs — the user clicks merge in GitLab when satisfied.

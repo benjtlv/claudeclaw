@@ -26,7 +26,7 @@ Shared resources live in `.claude/voice-ai-shared/` so other voice-ai-* skills c
 - **[../../voice-ai-shared/references/appointment-setting.md](../../voice-ai-shared/references/appointment-setting.md)** — Complete appointment scheduling flow. Read when the use case includes booking, and always in Trojan mode (the Trojan script hands off to it).
 - **[../../voice-ai-shared/references/knowledge-base-split.md](../../voice-ai-shared/references/knowledge-base-split.md)** — When (and when not) to move reference data out of the prompt into `kb-*.txt` files. Read before saving if the client provided supporting docs or if the drafted prompt is trending above ~10k tokens.
 - **[../../voice-ai-shared/references/faq-format.md](../../voice-ai-shared/references/faq-format.md)** — Canonical Topic/Question/Answer format every `kb-*.txt` file must follow. Read whenever you're about to write or edit a `kb-*.txt`.
-- **[../../voice-ai-shared/references/retell-conventions.md](../../voice-ai-shared/references/retell-conventions.md)** — Retell platform syntax: `--` pause marker, `NO_RESPONSE_NEEDED`, `{{variable}}` injection, `~text~` developer instructions, `~call function~` invocations. Read before writing any Steps or Objection Handling — every prompt needs the `--` guardrail in RULES TO NEVER BREAK and consistent `NO_RESPONSE_NEEDED` placement.
+- **[../../voice-ai-shared/references/retell-conventions.md](../../voice-ai-shared/references/retell-conventions.md)** — Retell platform syntax: `--` pause marker, `NO_RESPONSE_NEEDED`, `{{variable}}` injection, `~text~` developer instructions, `~call the function 'NAME'~` invocations, `~store 'x' in 'var'~` extraction grammar (post-call default; mid-call when nested in `extract_dynamic_variable`). Read before writing any Steps or Objection Handling — these literal grammars are what `voice-ai-deploy-retell` parses to auto-wire the Retell LLM's built-in functions and post-call analysis fields. Freestyle phrasings won't be picked up. Every prompt also needs the `--` guardrail in RULES TO NEVER BREAK and consistent `NO_RESPONSE_NEEDED` placement.
 - **[../../voice-ai-shared/references/trojan-horse.md](../../voice-ai-shared/references/trojan-horse.md)** — Sales overlay script: segue trigger, missed-calls math (industry-adapted), frame-flip close, deploy-tonight urgency, appointment push, guardrails. Read in Trojan mode only.
 - **[../../voice-ai-shared/assets/voice-agent-template.md](../../voice-ai-shared/assets/voice-agent-template.md)** — Master template for the regular receptionist prompt. Always use this as the base.
 - **[../../voice-ai-shared/assets/voice-agent-template-trojan-overlay.md](../../voice-ai-shared/assets/voice-agent-template-trojan-overlay.md)** — The Trojan overlay block that layers on top of the regular template. Read in Trojan mode only.
@@ -99,6 +99,51 @@ In Trojan mode, the underlying prompt flavor is almost always **Inbound Receptio
 
 ---
 
+## Step 2.5: Plan Retell functions and extraction variables
+
+Before writing any Steps, enumerate what Retell-side wiring this agent will need. The deploy skill parses literal grammar out of the finished prompt to auto-configure the LLM and agent — so if you don't write the grammar, the config won't exist. Planning upfront prevents the common mistake of drafting the whole prompt in prose and retrofitting `~call the function '...'~` lines at the end (which always misses cases).
+
+Read [../../voice-ai-shared/references/retell-conventions.md](../../voice-ai-shared/references/retell-conventions.md) before continuing. The full grammar and the two extraction modes are defined there — this step is the planning overlay.
+
+### 2.5a. Which built-in functions will this agent need?
+
+Walk through the conversation flow you're about to build and mark every place that requires one of the 5 built-ins:
+
+| Function | Use when |
+|---|---|
+| `end_call` | Any hang-up point — successful close, spam/vendor filter, remove-from-list, aggressive caller, dead conversation. Almost every prompt needs this in multiple Steps. |
+| `transfer_call` | Escalation to a human phone number (front desk, owner, on-call). Requires a gated condition block (business hours + qualifying trigger). |
+| `agent_transfer` | Hand off to a different Retell agent (multi-agent workflows, specialised handlers). Rare. |
+| `press_digit` | Agent is navigating an IVR menu on an outbound call. Outbound-only. |
+| `extract_dynamic_variable` | Mid-call variable capture — any variable you'll reference via `{{var}}` later in the prompt, or any variable that drives `IF` branching downstream. |
+
+Any other function name (e.g. `book_appointment`, `check_availability`, `SetupCallback`, `extract_timezone`) is a **custom function**. Still write it with the new grammar — `~call the function 'book_appointment' with ...~` — but know that the deploy skill won't auto-configure it. Custom functions are manually wired until the N8N agent-level webhook router ships. Flag every custom function in the final report so Ben can wire it by hand.
+
+### 2.5b. Which variables are mid-call vs post-call?
+
+Go through the "Info to collect" list from Step 1b and label each:
+
+- **Post-call** (default) — the variable is only needed after the call ends, for analytics / CRM push / follow-up. Example: `issue_summary`, `final_disposition`, `qualified`. Write as a bare `~store 'x' in 'var'~` line wherever the capture naturally happens in the flow.
+- **Mid-call** — the variable gets referenced by the prompt itself (via `{{var}}` injection) or drives an `IF` branch that comes later in the same call. Example: `customer_name` (used in "Alright {{customer_name}}, you're all set"), `timezone` (used in `{{current_time_{{timezone}}}}`), `is_new_customer` (drives Step 4 routing). Wrap the `store` lines inside an `~call the function 'extract_dynamic_variable'~` block at the capture point.
+
+Batch related mid-call captures inside one `extract_dynamic_variable` call when they belong to the same turn — cheaper and tighter for the model.
+
+### 2.5c. Output of this step
+
+A short planning note you'll use when writing Steps and Objection Handling. Example:
+
+> **Built-ins needed:** `end_call` (spam filter, vendor filter, wrong number, "not interested" second attempt, aggressive caller, remove-from-list, successful close), `transfer_call` (urgent booking request during business hours with a qualified caller), `extract_dynamic_variable` (timezone capture before booking; is_new_customer flag for Step 4 routing).
+>
+> **Custom functions (manual wiring):** `check_availability`, `book_appointment`, `SetupCallback`.
+>
+> **Mid-call variables** (→ `extract_dynamic_variable`): `customer_name`, `timezone`, `is_new_customer`.
+>
+> **Post-call variables** (→ bare `store`, auto-wired to post-call analysis): `full_name`, `phone_number`, `email`, `issue_summary`, `qualified`, `final_disposition`.
+
+Carry this note forward. When you write Steps in the next step, apply the grammar exactly as planned — don't freelance.
+
+---
+
 ## Step 3: Build the regular prompt
 
 Use only the **behavioral chunks** from Step 1.5. Reference chunks are excluded from the prompt entirely — they go to KB files in Step 3.5. The prompt you write here must not contain compressed or summarised mirrors of any reference content (no "Quick Reference" sections, no inline pricing/hours/roster tables that also live in a KB).
@@ -138,6 +183,20 @@ Read [../../voice-ai-shared/assets/voice-agent-template.md](../../voice-ai-share
 - [ ] Variable names defined for all collected fields
 - [ ] Pushy caller rescue block is present
 - [ ] Appointment setting has timezone + AM/PM rules (if applicable)
+
+### Retell grammar checklist (applies to both prompts)
+
+Every function call, capture, and variable reference must use the literal grammar from [../../voice-ai-shared/references/retell-conventions.md](../../voice-ai-shared/references/retell-conventions.md). These are what the deploy skill parses — if the grammar is wrong, the Retell config won't be written.
+
+- [ ] Every hang-up point uses `~call the function 'end_call'~` (no `~call end_call~`, no `~end call~`, no prose hang-up)
+- [ ] Every human-transfer point uses `~call the function 'transfer_call'~` (gated on business hours + qualifying condition per qualification-framework.md)
+- [ ] IVR digit sends use `~call the function 'press_digit'~`, agent handoffs use `~call the function 'agent_transfer'~`
+- [ ] Every captured variable uses `~store 'x' in 'var_name'~` — where `x` is a natural-language description of what to capture, and `var_name` is the target variable
+- [ ] Variables that the prompt later references via `{{var}}` OR that drive downstream `IF` logic are wrapped in `~call the function 'extract_dynamic_variable'~` blocks (mid-call extraction)
+- [ ] Variables used only for post-call analytics are bare `~store ...~` lines (post-call extraction, auto-configured by deploy skill)
+- [ ] Related mid-call captures are batched inside a single `extract_dynamic_variable` call where they belong to the same turn
+- [ ] Custom functions (anything other than `end_call`, `transfer_call`, `agent_transfer`, `press_digit`, `extract_dynamic_variable`) still use the `~call the function 'NAME'~` grammar, and each one is listed in the final report so Ben can wire it manually (no auto-config until the N8N phase)
+- [ ] `{{variable}}` references only appear AFTER the `store` statement that populates them
 
 ---
 
